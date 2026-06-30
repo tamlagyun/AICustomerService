@@ -1,0 +1,25 @@
+import { describe, expect, it } from "vitest";
+
+import { resolveDevServerConfig } from "./devServerConfig";
+
+describe("resolveDevServerConfig", () => {
+  it("uses localhost defaults", () => {
+    const config = resolveDevServerConfig({});
+
+    expect(config.host).toBe("127.0.0.1");
+    expect(config.port).toBe(5173);
+    expect(config.backendOrigin).toBe("http://127.0.0.1:8000");
+  });
+
+  it("allows host, port, and backend origin to be configured", () => {
+    const config = resolveDevServerConfig({
+      FRONTEND_HOST: "0.0.0.0",
+      FRONTEND_PORT: "6180",
+      BACKEND_ORIGIN: "http://192.168.8.151:8000",
+    });
+
+    expect(config.host).toBe("0.0.0.0");
+    expect(config.port).toBe(6180);
+    expect(config.backendOrigin).toBe("http://192.168.8.151:8000");
+  });
+});

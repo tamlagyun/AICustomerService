@@ -1,0 +1,163 @@
+:root {
+  color: #172033;
+  background: #f4f7fb;
+  font-family:
+    Inter, "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.page-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.chat-panel {
+  width: min(920px, 100%);
+  min-height: min(720px, calc(100vh - 48px));
+  background: #ffffff;
+  border: 1px solid #d8e0ec;
+  border-radius: 8px;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  overflow: hidden;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 24px;
+  border-bottom: 1px solid #d8e0ec;
+}
+
+.chat-header h1 {
+  margin: 0 0 6px;
+  font-size: 22px;
+}
+
+.chat-header p {
+  margin: 0;
+  color: #5d6b82;
+}
+
+.status-pill {
+  border: 1px solid #b9c7da;
+  border-radius: 999px;
+  padding: 6px 10px;
+  color: #39506f;
+  white-space: nowrap;
+}
+
+.message-list {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.message {
+  max-width: 76%;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.message span {
+  display: block;
+  margin-bottom: 6px;
+  color: #5d6b82;
+  font-size: 13px;
+}
+
+.message p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.message small {
+  display: block;
+  margin-top: 8px;
+  color: #52647c;
+}
+
+.message-status {
+  color: #2454a6;
+}
+
+.message.agent {
+  align-self: flex-start;
+  background: #eef3fb;
+}
+
+.message.player {
+  align-self: flex-end;
+  background: #dff3ea;
+}
+
+.composer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  padding: 16px 24px 20px;
+  border-top: 1px solid #d8e0ec;
+}
+
+.composer input {
+  min-width: 0;
+  border: 1px solid #bdc9da;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.composer button {
+  border: 0;
+  border-radius: 8px;
+  padding: 0 18px;
+  color: #ffffff;
+  background: #2454a6;
+  cursor: pointer;
+}
+
+.composer button:disabled,
+.composer input:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.error-message {
+  margin: -10px 24px 16px;
+  color: #b42318;
+}
+
+@media (max-width: 640px) {
+  .page-shell {
+    padding: 0;
+  }
+
+  .chat-panel {
+    min-height: 100vh;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .chat-header,
+  .composer {
+    padding-inline: 16px;
+  }
+
+  .message {
+    max-width: 92%;
+  }
+}

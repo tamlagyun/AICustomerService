@@ -7,6 +7,7 @@ class AgentAction(StrEnum):
     KNOWLEDGE_BASE = "knowledge_base"
     MYSQL_PLAYER_PROFILE = "mysql_player_profile"
     MYSQL_PLAYERS_LIST = "mysql_players_list"
+    AVATAR_GENERATE = "avatar_generate"
     ASK_CLARIFICATION = "ask_clarification"
     HANDOFF = "handoff"
     DIRECT_ANSWER = "direct_answer"

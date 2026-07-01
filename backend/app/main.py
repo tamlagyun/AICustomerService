@@ -1,8 +1,10 @@
 import json
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.agent import run_customer_service_agent, stream_customer_service_agent
 from app.config import get_settings
@@ -11,6 +13,8 @@ from app.schemas import ChatRequest, ChatResponse
 settings = get_settings()
 
 app = FastAPI(title="Customer Service AI Agent API")
+generated_dir = Path(__file__).resolve().parents[2] / "generated"
+generated_dir.mkdir(parents=True, exist_ok=True)
 
 app.add_middleware(
     CORSMiddleware,
@@ -19,6 +23,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.mount("/generated", StaticFiles(directory=generated_dir), name="generated")
 
 
 @app.get("/health")

@@ -24,6 +24,7 @@ frontend/devServerConfig.d.ts
 
 # Local data
 backend/data/
+generated/
 *.sqlite
 *.db
 

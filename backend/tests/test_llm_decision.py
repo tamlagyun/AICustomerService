@@ -45,6 +45,19 @@ def test_parse_agent_decision_accepts_players_list_action() -> None:
     assert decision.final_task == "总结玩家列表整体情况"
 
 
+def test_parse_agent_decision_accepts_avatar_generate_action() -> None:
+    decision = parse_agent_decision(
+        (
+            '{"action":"avatar_generate","reason":"玩家要求根据资料生成头像",'
+            '"arguments":{"player_id":"1"},"final_task":"生成符合玩家个性的头像"}'
+        )
+    )
+
+    assert decision.action == AgentAction.AVATAR_GENERATE
+    assert decision.arguments == {"player_id": "1"}
+    assert decision.final_task == "生成符合玩家个性的头像"
+
+
 def test_parse_agent_decision_falls_back_on_invalid_json() -> None:
     decision = parse_agent_decision("我觉得应该查询玩家资料")
 

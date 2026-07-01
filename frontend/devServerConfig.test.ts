@@ -9,6 +9,10 @@ describe("resolveDevServerConfig", () => {
     expect(config.host).toBe("127.0.0.1");
     expect(config.port).toBe(5173);
     expect(config.backendOrigin).toBe("http://127.0.0.1:8000");
+    expect(config.backendProxy).toEqual({
+      "/api": "http://127.0.0.1:8000",
+      "/generated": "http://127.0.0.1:8000",
+    });
   });
 
   it("allows host, port, and backend origin to be configured", () => {
@@ -21,5 +25,9 @@ describe("resolveDevServerConfig", () => {
     expect(config.host).toBe("0.0.0.0");
     expect(config.port).toBe(6180);
     expect(config.backendOrigin).toBe("http://192.168.8.151:8000");
+    expect(config.backendProxy).toEqual({
+      "/api": "http://192.168.8.151:8000",
+      "/generated": "http://192.168.8.151:8000",
+    });
   });
 });

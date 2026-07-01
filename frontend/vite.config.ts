@@ -14,9 +14,7 @@ export default defineConfig({
   server: {
     host: devServer.host,
     port: devServer.port,
-    proxy: {
-      "/api": devServer.backendOrigin,
-    },
+    proxy: devServer.backendProxy,
   },
   test: {
     environment: "jsdom",

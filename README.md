@@ -169,6 +169,23 @@ direct_answer
 
 模型不能生成 SQL，也不能直接访问数据库。
 
+## 会话记忆
+
+后端已支持内存级短期会话记忆：
+
+- 按 `session_id` 隔离。
+- 默认保留最近 10 条 user / assistant 消息。
+- Agent 决策和最终回复会接收最近历史对话。
+- 后端重启后记忆会丢失。
+
+当前前端开发环境固定使用：
+
+```text
+session_id=local-session
+```
+
+因此同一个浏览器页面内的连续对话会共享上下文。生产环境应改为由登录态、设备 ID 或后端会话系统生成 `session_id`，并把记忆迁移到 MySQL 或 Redis。
+
 ## 知识库
 
 当前支持把 Markdown 和 HTML 文件放入 `knowledge_base/`。后端会读取文件并按标题分块，使用轻量关键词检索返回相关内容和来源。

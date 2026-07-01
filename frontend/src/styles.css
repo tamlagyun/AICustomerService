@@ -96,6 +96,17 @@ input {
   color: #2454a6;
 }
 
+.message-image {
+  display: block;
+  width: min(220px, 100%);
+  aspect-ratio: 1;
+  margin-top: 10px;
+  border-radius: 8px;
+  border: 1px solid #d8e0ec;
+  background: #ffffff;
+  object-fit: cover;
+}
+
 .message.agent {
   align-self: flex-start;
   background: #eef3fb;

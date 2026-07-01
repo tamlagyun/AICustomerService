@@ -1,12 +1,22 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 
+const originalScrollIntoView = Element.prototype.scrollIntoView;
+
 describe("App", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    if (originalScrollIntoView) {
+      Object.defineProperty(Element.prototype, "scrollIntoView", {
+        configurable: true,
+        value: originalScrollIntoView,
+      });
+    } else {
+      delete (Element.prototype as Partial<Element>).scrollIntoView;
+    }
   });
 
   it("renders the customer service chat shell", () => {
@@ -58,6 +68,69 @@ describe("App", () => {
     expect(await screen.findByText("正在查询工具数据")).toBeInTheDocument();
     expect(await screen.findByText("请提供订单号")).toBeInTheDocument();
     expect(screen.getByText("来源：充值未到账怎么办")).toBeInTheDocument();
+  });
+
+  it("renders avatar images returned by the stream done event", async () => {
+    const encoder = new TextEncoder();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode('event: status\ndata: {"message":"正在生成头像"}\n\n'));
+            controller.enqueue(encoder.encode('event: token\ndata: {"text":"已生成头像"}\n\n'));
+            controller.enqueue(
+              encoder.encode(
+                'event: done\ndata: {"sources":[],"handoff":false,"images":[{"url":"/generated/avatars/player-1.png","alt":"玩家头像"}]}\n\n',
+              ),
+            );
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(screen.getByLabelText("输入玩家问题"), "根据ID=1生成头像");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    const image = await screen.findByRole("img", { name: "玩家头像" });
+    expect(image).toHaveAttribute("src", "/generated/avatars/player-1.png");
+  });
+
+  it("scrolls to the latest message while streaming updates arrive", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    const encoder = new TextEncoder();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode('event: status\ndata: {"message":"正在分析问题"}\n\n'));
+            controller.enqueue(encoder.encode('event: token\ndata: {"text":"第一段"}\n\n'));
+            controller.enqueue(encoder.encode('event: token\ndata: {"text":"第二段"}\n\n'));
+            controller.enqueue(encoder.encode('event: done\ndata: {"sources":[],"handoff":false}\n\n'));
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    scrollIntoView.mockClear();
+
+    await user.type(screen.getByLabelText("输入玩家问题"), "请帮我查询资料");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("第一段第二段")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "end" });
+    });
   });
 
   it("shows an error message when REST chat API fails", async () => {

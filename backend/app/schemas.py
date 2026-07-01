@@ -13,7 +13,13 @@ class ChatSource(BaseModel):
     reference: str
 
 
+class ChatImage(BaseModel):
+    url: str
+    alt: str
+
+
 class ChatResponse(BaseModel):
     reply: str
     sources: list[ChatSource] = []
     handoff: bool = False
+    images: list[ChatImage] = []

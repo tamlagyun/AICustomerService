@@ -4,10 +4,16 @@ export type ChatSource = {
   reference: string;
 };
 
+export type ChatImage = {
+  url: string;
+  alt: string;
+};
+
 export type ChatResponse = {
   reply: string;
   sources: ChatSource[];
   handoff: boolean;
+  images: ChatImage[];
 };
 
 export async function sendChatMessage(message: string): Promise<ChatResponse> {
@@ -29,7 +35,7 @@ export async function sendChatMessage(message: string): Promise<ChatResponse> {
 
 export type ChatStreamHandlers = {
   onToken: (text: string) => void;
-  onDone: (response: Pick<ChatResponse, "sources" | "handoff">) => void;
+  onDone: (response: Pick<ChatResponse, "sources" | "handoff" | "images">) => void;
   onStatus?: (message: string) => void;
 };
 
@@ -94,6 +100,7 @@ function handleSseEvent(rawEvent: string, handlers: ChatStreamHandlers): void {
     handlers.onDone({
       sources: Array.isArray(data.sources) ? (data.sources as ChatSource[]) : [],
       handoff: data.handoff === true,
+      images: Array.isArray(data.images) ? (data.images as ChatImage[]) : [],
     });
   }
   if (event === "error") {

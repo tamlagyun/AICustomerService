@@ -1,6 +1,6 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
-import { ChatSource, sendChatMessageStream } from "./api/chat";
+import { ChatImage, ChatSource, sendChatMessageStream } from "./api/chat";
 
 type ChatMessage = {
   role: "player" | "agent";
@@ -8,6 +8,7 @@ type ChatMessage = {
   status?: string;
   statuses?: string[];
   sources?: ChatSource[];
+  images?: ChatImage[];
 };
 
 const initialMessages: ChatMessage[] = [
@@ -22,6 +23,11 @@ export function App() {
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const latestMessageRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    latestMessageRef.current?.scrollIntoView?.({ behavior: "smooth", block: "end" });
+  }, [messages]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -60,6 +66,7 @@ export function App() {
             status: "已完成",
             statuses: [...(message.statuses ?? []), "已完成"],
             sources: response.sources,
+            images: response.images,
           })));
         },
       });
@@ -94,8 +101,12 @@ export function App() {
               {message.sources?.map((source) => (
                 <small key={source.reference}>来源：{source.title}</small>
               ))}
+              {message.images?.map((image) => (
+                <img className="message-image" key={image.url} src={image.url} alt={image.alt} />
+              ))}
             </article>
           ))}
+          <div ref={latestMessageRef} aria-hidden="true" />
         </div>
 
         <form className="composer" onSubmit={handleSubmit}>

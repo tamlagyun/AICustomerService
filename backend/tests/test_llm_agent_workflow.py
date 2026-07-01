@@ -1,5 +1,6 @@
 from app.agent.customer_service import run_customer_service_agent
 from app.agent.decision import AgentAction, AgentDecision
+from app.avatar_generation import AvatarGenerationResult, AvatarGenerationStatus
 from app.llm import LLMResponse
 from app.player_data import PlayerDataResult, PlayerDataStatus
 
@@ -66,6 +67,28 @@ class FakePlayerDataTools:
                     },
                 ],
             },
+        )
+
+
+class FakeAvatarGenerator:
+    def __init__(self) -> None:
+        self.profile: dict | None = None
+        self.session_id: str | None = None
+
+    def generate_player_avatar(
+        self,
+        profile: dict,
+        *,
+        session_id: str,
+    ) -> AvatarGenerationResult:
+        self.profile = profile
+        self.session_id = session_id
+        return AvatarGenerationResult(
+            status=AvatarGenerationStatus.GENERATED,
+            summary="已生成本地 PNG 头像：/generated/avatars/player-1.png",
+            url="/generated/avatars/player-1.png",
+            alt="ai大名 的个性头像",
+            data={"style": "策略研究型"},
         )
 
 
@@ -204,6 +227,47 @@ async def test_llm_agent_uses_players_list_action_and_limit(monkeypatch) -> None
     assert "进攻型玩家" in final_prompt
 
 
+async def test_llm_agent_generates_avatar_from_player_profile(monkeypatch) -> None:
+    player_tools = FakePlayerDataTools()
+    avatar_generator = FakeAvatarGenerator()
+    monkeypatch.setattr(
+        "app.agent.customer_service.build_player_data_tools",
+        lambda: player_tools,
+    )
+    monkeypatch.setattr(
+        "app.agent.customer_service.build_avatar_generator",
+        lambda: avatar_generator,
+    )
+    llm_client = FakeLLMClient(
+        decision=AgentDecision(
+            action=AgentAction.AVATAR_GENERATE,
+            reason="玩家要求根据资料生成头像",
+            arguments={"player_id": "1"},
+            final_task="根据玩家资料生成符合个性的头像",
+        ),
+        final_reply="已根据你的资料生成了一个策略研究型头像。",
+    )
+
+    response = await run_customer_service_agent(
+        session_id="avatar-session",
+        message="根据ID=1查询我的资料并生成符合个性的头像",
+        llm_client=llm_client,
+    )
+
+    assert player_tools.requested_player_id == "1"
+    assert avatar_generator.session_id == "avatar-session"
+    assert avatar_generator.profile is not None
+    assert avatar_generator.profile["desc"] == "喜欢研究机制。"
+    assert response.reply == "已根据你的资料生成了一个策略研究型头像。"
+    assert len(response.images) == 1
+    assert response.images[0].url == "/generated/avatars/player-1.png"
+    assert response.images[0].alt == "ai大名 的个性头像"
+    assert llm_client.final_messages is not None
+    final_prompt = llm_client.final_messages[-1]["content"]
+    assert "avatar_generate" in final_prompt
+    assert "/generated/avatars/player-1.png" in final_prompt
+
+
 async def test_llm_agent_direct_answer_does_not_call_final_generation() -> None:
     llm_client = FakeLLMClient(
         decision=AgentDecision(
@@ -266,6 +330,77 @@ async def test_agent_answers_streaming_capability_from_system_fact() -> None:
 
     assert "已采用 SSE 流式输出" in response.reply
     assert "/api/chat/stream" in response.reply
+
+
+async def test_llm_agent_includes_same_session_history_in_decision_prompt() -> None:
+    first_turn_llm = FakeLLMClient(
+        decision=AgentDecision(
+            action=AgentAction.DIRECT_ANSWER,
+            reason="记录玩家 ID",
+            direct_reply="我记住了，你的 ID 是 1。",
+        ),
+        final_reply="不应该使用这个回复",
+    )
+    await run_customer_service_agent(
+        session_id="memory-session",
+        message="我的 ID 是 1",
+        llm_client=first_turn_llm,
+    )
+    second_turn_llm = FakeLLMClient(
+        decision=AgentDecision(
+            action=AgentAction.MYSQL_PLAYER_PROFILE,
+            reason="根据历史中的玩家 ID 查询资料",
+            arguments={"player_id": "1"},
+        ),
+        final_reply="已查询玩家 ID 1 的资料。",
+    )
+
+    await run_customer_service_agent(
+        session_id="memory-session",
+        message="查询我的资料",
+        llm_client=second_turn_llm,
+    )
+
+    assert second_turn_llm.decision_messages is not None
+    decision_context = second_turn_llm.decision_messages[-1]["content"]
+    assert "我的 ID 是 1" in decision_context
+    assert "我记住了，你的 ID 是 1。" in decision_context
+    assert "查询我的资料" in decision_context
+
+
+async def test_llm_agent_does_not_share_history_between_sessions() -> None:
+    first_turn_llm = FakeLLMClient(
+        decision=AgentDecision(
+            action=AgentAction.DIRECT_ANSWER,
+            reason="记录玩家 ID",
+            direct_reply="我记住了，你的 ID 是 1。",
+        ),
+        final_reply="不应该使用这个回复",
+    )
+    await run_customer_service_agent(
+        session_id="memory-session-a",
+        message="我的 ID 是 1",
+        llm_client=first_turn_llm,
+    )
+    second_turn_llm = FakeLLMClient(
+        decision=AgentDecision(
+            action=AgentAction.DIRECT_ANSWER,
+            reason="普通追问",
+            direct_reply="请提供你的玩家 ID。",
+        ),
+        final_reply="不应该使用这个回复",
+    )
+
+    await run_customer_service_agent(
+        session_id="memory-session-b",
+        message="查询我的资料",
+        llm_client=second_turn_llm,
+    )
+
+    assert second_turn_llm.decision_messages is not None
+    decision_context = second_turn_llm.decision_messages[-1]["content"]
+    assert "我的 ID 是 1" not in decision_context
+    assert "我记住了，你的 ID 是 1。" not in decision_context
 
 
 async def test_llm_agent_falls_back_to_rules_when_decision_is_invalid() -> None:

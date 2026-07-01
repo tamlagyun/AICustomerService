@@ -4,13 +4,20 @@ export type DevServerConfig = {
   host: string;
   port: number;
   backendOrigin: string;
+  backendProxy: Record<string, string>;
 };
 
 export function resolveDevServerConfig(env: EnvLike): DevServerConfig {
+  const backendOrigin = env.BACKEND_ORIGIN || "http://127.0.0.1:8000";
+
   return {
     host: env.FRONTEND_HOST || "127.0.0.1",
     port: parsePort(env.FRONTEND_PORT, 5173),
-    backendOrigin: env.BACKEND_ORIGIN || "http://127.0.0.1:8000",
+    backendOrigin,
+    backendProxy: {
+      "/api": backendOrigin,
+      "/generated": backendOrigin,
+    },
   };
 }
 

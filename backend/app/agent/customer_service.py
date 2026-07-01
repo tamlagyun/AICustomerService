@@ -6,12 +6,14 @@ from typing import Any, AsyncIterator, Literal, TypedDict
 from langgraph.graph import END, StateGraph
 
 from app.agent.decision import AgentAction, AgentDecision
+from app.avatar_generation import AvatarGenerationResult, build_avatar_generator
 from app.config import get_settings
+from app.conversation_memory import ConversationMessage, get_conversation_memory
 from app.knowledge_base import KnowledgeBaseSearch, KnowledgeChunk
 from app.llm import LLMClientProtocol, build_llm_client
-from app.player_data import PlayerDataResult, build_player_data_tools
+from app.player_data import PlayerDataResult, PlayerDataStatus, build_player_data_tools
 from app.safety import SafetyAction, SafetyDecision, analyze_safety, redact_sensitive_text
-from app.schemas import ChatResponse, ChatSource
+from app.schemas import ChatImage, ChatResponse, ChatSource
 
 QuestionType = Literal["handoff", "knowledge", "general", "refuse", "player_data", "direct_answer"]
 
@@ -28,8 +30,11 @@ class CustomerServiceState(TypedDict, total=False):
     use_llm_final_reply: bool
     knowledge_results: list[KnowledgeChunk]
     player_data_result: PlayerDataResult
+    avatar_result: AvatarGenerationResult
+    conversation_history: list[ConversationMessage]
     reply: str
     sources: list[ChatSource]
+    images: list[ChatImage]
     handoff: bool
     status_queue: asyncio.Queue[str]
 
@@ -42,11 +47,13 @@ def build_customer_service_graph():
     workflow.add_node("retrieve_knowledge", retrieve_knowledge)
     workflow.add_node("retrieve_player_data", retrieve_player_data)
     workflow.add_node("retrieve_players_list", retrieve_players_list)
+    workflow.add_node("generate_avatar", generate_avatar)
     workflow.add_node("generate_refusal_reply", generate_refusal_reply)
     workflow.add_node("generate_handoff_reply", generate_handoff_reply)
     workflow.add_node("generate_general_reply", generate_general_reply)
     workflow.add_node("generate_knowledge_reply", generate_knowledge_reply)
     workflow.add_node("generate_player_data_reply", generate_player_data_reply)
+    workflow.add_node("generate_avatar_reply", generate_avatar_reply)
     workflow.add_node("generate_direct_reply", generate_direct_reply)
     workflow.add_node("generate_no_knowledge_reply", generate_no_knowledge_reply)
     workflow.add_node("generate_llm_final_reply", generate_llm_final_reply)
@@ -73,6 +80,7 @@ def build_customer_service_graph():
             "knowledge": "retrieve_knowledge",
             "player_data": "retrieve_player_data",
             "players_list": "retrieve_players_list",
+            "avatar": "retrieve_player_data",
         },
     )
     workflow.add_conditional_edges(
@@ -94,8 +102,16 @@ def build_customer_service_graph():
             "fallback": "generate_no_knowledge_reply",
         },
     )
-    workflow.add_edge("retrieve_player_data", "generate_player_data_reply")
+    workflow.add_conditional_edges(
+        "retrieve_player_data",
+        route_after_player_data,
+        {
+            "avatar": "generate_avatar",
+            "player_data": "generate_player_data_reply",
+        },
+    )
     workflow.add_edge("retrieve_players_list", "generate_player_data_reply")
+    workflow.add_edge("generate_avatar", "generate_avatar_reply")
     workflow.add_edge("generate_refusal_reply", "finalize")
     workflow.add_edge("generate_handoff_reply", "finalize")
     workflow.add_conditional_edges(
@@ -110,6 +126,11 @@ def build_customer_service_graph():
     )
     workflow.add_conditional_edges(
         "generate_player_data_reply",
+        route_final_reply,
+        {"llm": "generate_llm_final_reply", "final": "finalize"},
+    )
+    workflow.add_conditional_edges(
+        "generate_avatar_reply",
         route_final_reply,
         {"llm": "generate_llm_final_reply", "final": "finalize"},
     )
@@ -128,24 +149,31 @@ async def run_customer_service_agent(
     llm_client: LLMClientProtocol | None = None,
     status_queue: asyncio.Queue[str] | None = None,
 ) -> ChatResponse:
+    memory = get_conversation_memory()
     capability_reply = _system_capability_reply(message)
     if capability_reply is not None:
-        return ChatResponse(reply=capability_reply)
+        response = ChatResponse(reply=capability_reply)
+        _record_conversation_exchange(session_id, message, response.reply)
+        return response
 
     final_state = await _compiled_graph().ainvoke(
         {
             "session_id": session_id,
             "player_id": player_id,
             "message": message,
+            "conversation_history": memory.get_recent_messages(session_id),
             "llm_client": llm_client if llm_client is not None else build_llm_client(),
             "status_queue": status_queue,
         }
     )
-    return ChatResponse(
+    response = ChatResponse(
         reply=redact_sensitive_text(final_state["reply"]),
         sources=final_state.get("sources", []),
         handoff=final_state.get("handoff", False),
+        images=final_state.get("images", []),
     )
+    _record_conversation_exchange(session_id, message, response.reply)
+    return response
 
 
 def _system_capability_reply(message: str) -> str | None:
@@ -211,6 +239,7 @@ async def stream_customer_service_agent(
         "data": {
             "sources": [source.model_dump() for source in response.sources],
             "handoff": response.handoff,
+            "images": [image.model_dump() for image in response.images],
         },
     }
 
@@ -243,7 +272,12 @@ async def decide_action_with_llm(state: CustomerServiceState) -> CustomerService
 
     try:
         _emit_status(state, "正在请求大模型决策")
-        decision = await llm_client.decide_action(_decision_messages(state["normalized_message"]))
+        decision = await llm_client.decide_action(
+            _decision_messages(
+                state["normalized_message"],
+                state.get("conversation_history", []),
+            )
+        )
     except Exception:
         return state
 
@@ -260,6 +294,7 @@ def route_llm_decision(
     "knowledge",
     "player_data",
     "players_list",
+    "avatar",
 ]:
     decision = state.get("llm_decision")
     if decision is None or decision.action == AgentAction.FALLBACK:
@@ -276,6 +311,8 @@ def route_llm_decision(
         return "player_data"
     if decision.action == AgentAction.MYSQL_PLAYERS_LIST:
         return "players_list"
+    if decision.action == AgentAction.AVATAR_GENERATE:
+        return "avatar"
     return "fallback"
 
 
@@ -308,6 +345,13 @@ def route_after_knowledge(state: CustomerServiceState) -> Literal["knowledge", "
     if state.get("question_type") == "general":
         return "general"
     return "fallback"
+
+
+def route_after_player_data(state: CustomerServiceState) -> Literal["avatar", "player_data"]:
+    decision = state.get("llm_decision")
+    if decision is not None and decision.action == AgentAction.AVATAR_GENERATE:
+        return "avatar"
+    return "player_data"
 
 
 def retrieve_knowledge(state: CustomerServiceState) -> CustomerServiceState:
@@ -404,6 +448,56 @@ def generate_player_data_reply(state: CustomerServiceState) -> CustomerServiceSt
     }
 
 
+def generate_avatar(state: CustomerServiceState) -> CustomerServiceState:
+    _emit_status(state, "正在根据玩家资料生成头像")
+    player_data_result = state.get("player_data_result")
+    if (
+        player_data_result is None
+        or player_data_result.status != PlayerDataStatus.FOUND
+        or not player_data_result.data
+    ):
+        reply = (
+            player_data_result.summary
+            if player_data_result is not None
+            else "需要先查询到玩家资料，才能生成个性头像。"
+        )
+        return {
+            **state,
+            "reply": reply,
+            "sources": [],
+            "images": [],
+            "handoff": False,
+        }
+
+    avatar_result = build_avatar_generator().generate_player_avatar(
+        player_data_result.data,
+        session_id=state["session_id"],
+    )
+    images = (
+        [ChatImage(url=avatar_result.url, alt=avatar_result.alt)]
+        if avatar_result.url and avatar_result.alt
+        else []
+    )
+    return {
+        **state,
+        "avatar_result": avatar_result,
+        "reply": avatar_result.summary,
+        "sources": [],
+        "images": images,
+        "handoff": False,
+    }
+
+
+def generate_avatar_reply(state: CustomerServiceState) -> CustomerServiceState:
+    _emit_status(state, "正在整理头像结果")
+    return {
+        **state,
+        "sources": state.get("sources", []),
+        "images": state.get("images", []),
+        "handoff": False,
+    }
+
+
 def generate_no_knowledge_reply(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在准备回复")
     return {
@@ -465,22 +559,44 @@ def _emit_status(state: CustomerServiceState, message: str) -> None:
         status_queue.put_nowait(message)
 
 
+def _record_conversation_exchange(session_id: str, user_message: str, assistant_reply: str) -> None:
+    memory = get_conversation_memory()
+    memory.append_message(session_id, "user", user_message)
+    memory.append_message(session_id, "assistant", assistant_reply)
+
+
+def _format_conversation_history(messages: list[ConversationMessage]) -> str:
+    if not messages:
+        return "无"
+
+    lines = []
+    for message in messages:
+        role_label = "玩家" if message.role == "user" else "客服"
+        lines.append(f"{role_label}：{message.content}")
+    return "\n".join(lines)
+
+
 @lru_cache
 def _compiled_graph():
     return build_customer_service_graph()
 
 
-def _decision_messages(message: str) -> list[dict[str, str]]:
+def _decision_messages(
+    message: str,
+    conversation_history: list[ConversationMessage],
+) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
             "content": (
                 "你是游戏客服 Agent 的决策器。只允许输出 JSON，不要输出额外文字。"
-                "可选 action: knowledge_base, mysql_player_profile, mysql_players_list, ask_clarification, handoff, direct_answer。"
+                "可选 action: knowledge_base, mysql_player_profile, mysql_players_list, avatar_generate, ask_clarification, handoff, direct_answer。"
                 "不能生成 SQL。数据库查询只能选择 mysql_player_profile 或 mysql_players_list。"
                 "如果需要玩家资料，选择 mysql_player_profile，并在 arguments.player_id 中填写玩家 ID。"
                 "如果用户要求查询 players 表所有数据、全部玩家、玩家列表，选择 mysql_players_list。"
                 "mysql_players_list 可选 arguments.limit，默认 100，最大 1000。"
+                "如果用户要求生成头像、形象图、个性头像，选择 avatar_generate；该动作会先通过后端工具查询玩家资料，再生成本地 PNG 头像。"
+                "avatar_generate 需要 arguments.player_id；如果历史对话或当前问题没有明确玩家 ID，应选择 ask_clarification。"
                 "玩家可能会用“玩家ID”“角色ID”“我的ID”“唯一Key”“ID”等说法表达玩家 ID。"
                 "如果玩家要求查询后继续分析、总结或建议，把最终任务写入 final_task。"
                 "如果玩家 ID 缺失或有多个候选导致歧义，选择 ask_clarification 并在 direct_reply 中反问。"
@@ -495,8 +611,9 @@ def _decision_messages(message: str) -> list[dict[str, str]]:
         {
             "role": "user",
             "content": (
-                f"玩家问题：{message}\n"
-                "请输出 JSON，例如："
+                f"历史对话（最近 10 条）：\n{_format_conversation_history(conversation_history)}\n"
+                f"当前玩家问题：{message}\n"
+                "请结合历史对话和当前问题输出 JSON，例如："
                 '{"action":"mysql_player_profile","arguments":{"player_id":"1"},'
                 '"final_task":"根据玩家资料和 desc 字段分析总结玩家个性",'
                 '"reason":"需要查询玩家资料后继续分析","direct_reply":""}'
@@ -513,6 +630,7 @@ def _final_reply_messages(state: CustomerServiceState) -> list[dict[str, str]]:
     decision = state.get("llm_decision")
     final_task = decision.final_task if decision is not None else ""
     tool_data = _tool_data_for_prompt(state)
+    conversation_history = _format_conversation_history(state.get("conversation_history", []))
     return [
         {
             "role": "system",
@@ -520,6 +638,7 @@ def _final_reply_messages(state: CustomerServiceState) -> list[dict[str, str]]:
                 "你是游戏客服 AI。根据玩家问题和后端工具结果生成简洁、准确的中文回复。"
                 "不要编造工具结果中没有的信息。不要承诺未验证的补偿、退款或封禁解除。"
                 "如果玩家要求分析个性，只能基于工具结果中的 desc 字段和基础资料分析。"
+                "如果工具结果是本地 PNG 头像，只能说明已生成可预览的本地头像，不要声称已调用真实生图模型。"
                 "如果 desc 或相关字段不足以支持结论，必须明确说明信息不足。"
                 "如果工具结果显示无法查询或未启用，如实说明并引导转人工或补充信息。"
             ),
@@ -527,6 +646,7 @@ def _final_reply_messages(state: CustomerServiceState) -> list[dict[str, str]]:
         {
             "role": "user",
             "content": (
+                f"历史对话（最近 10 条）：\n{conversation_history}\n"
                 f"玩家问题：{state.get('normalized_message', state.get('message', ''))}\n"
                 f"最终任务：{final_task or '按玩家问题回复'}\n"
                 f"工具结果：{state.get('reply', '')}\n"
@@ -558,18 +678,33 @@ def _player_id_for_tool_call(state: CustomerServiceState) -> str | None:
 
 
 def _tool_data_for_prompt(state: CustomerServiceState) -> str:
+    tools: list[dict[str, object]] = []
     player_data_result = state.get("player_data_result")
     if player_data_result is not None:
-        return json.dumps(
+        tools.append(
             {
                 "tool": _tool_name_for_prompt(state),
                 "status": player_data_result.status,
                 "data": player_data_result.data,
-            },
-            ensure_ascii=False,
+            }
         )
 
-    return "{}"
+    avatar_result = state.get("avatar_result")
+    if avatar_result is not None:
+        tools.append(
+            {
+                "tool": "avatar_generate",
+                "status": avatar_result.status,
+                "url": avatar_result.url,
+                "alt": avatar_result.alt,
+                "data": avatar_result.data,
+            }
+        )
+
+    if not tools:
+        return "{}"
+
+    return json.dumps({"tools": tools}, ensure_ascii=False)
 
 
 def _players_limit_for_tool_call(state: CustomerServiceState) -> int:

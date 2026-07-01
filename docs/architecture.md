@@ -6,9 +6,11 @@
 React 客户端
   -> FastAPI /api/chat/stream（SSE 流式输出）
     -> LangGraph 客服 Agent
+      -> 会话记忆（按 session_id 读取最近 10 条）
       -> MySQL 查询工具
       -> 知识库检索工具
       -> 回复生成
+      -> 会话记忆（写入本轮 user / assistant）
     -> 流式返回 token，结束时返回来源和转人工状态
 ```
 
@@ -41,9 +43,11 @@ POST /api/chat
 ## Agent 职责
 
 - 判断玩家问题类型。
+- 读取并使用同一 `session_id` 下的最近对话历史。
 - 决定是否需要查询玩家数据。
 - 决定是否需要检索知识库。
 - 整合工具结果生成客服回复。
+- 在回复完成后写入本轮对话记忆。
 - 在无法确认或高风险场景下转人工。
 
 ## LangGraph 流程
@@ -101,6 +105,17 @@ analyze_safety
 - `direct_answer`：直接回复。
 
 如果模型未启用、调用失败、返回非法 JSON 或返回未知动作，系统回退到规则流程。
+
+## 会话记忆
+
+当前实现为内存级短期记忆：
+
+- 按 `session_id` 隔离。
+- 默认保留最近 10 条 user / assistant 消息。
+- 记忆会注入 DeepSeek 决策 prompt 和最终回复 prompt。
+- 后端进程重启后记忆会丢失。
+
+该方案适合本地开发和第一版多轮对话验证。正式环境建议迁移到 MySQL 或 Redis，并增加过期时间、用户权限和审计策略。
 
 ## 知识库检索
 

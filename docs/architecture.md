@@ -4,10 +4,11 @@
 
 ```text
 React 客户端
-  -> FastAPI /api/chat/stream（SSE 流式输出）
+  -> FastAPI /api/chat/stream（SSE 流式输出，携带 model_provider）
     -> LangGraph 客服 Agent
       -> 会话记忆（按 session_id 读取最近 10 条）
       -> MySQL 查询工具
+      -> 高德地图 MCP 工具
       -> 知识库检索工具
       -> 回复生成
       -> 会话记忆（写入本轮 user / assistant）
@@ -21,6 +22,26 @@ POST /api/chat
 ```
 
 该接口仍保留普通 REST 一次性返回，方便测试和兼容旧客户端。
+
+## 结构化展示
+
+后端返回 `reply` 文本，同时可以返回结构化 `tables`。前端不解析大模型文本里的 Markdown 表格，
+只渲染后端受控生成的表格数据：
+
+```text
+工具结构化结果
+  -> TableAdapter
+  -> ChatResponse.tables
+  -> 前端 TableRenderer
+  -> HTML table
+```
+
+当前表格转换规则：
+
+- `mysql_players_list`：玩家列表转为“玩家列表”表格。
+- `maps_text_search`：高德地点/POI 结果转为“高德地图地点结果”表格。
+
+如果工具只返回自然语言文本，后端不会强行拆表格，避免字段错误和内容错位。
 
 ## 前端监听配置
 
@@ -38,6 +59,7 @@ POST /api/chat
 - 处理登录态、玩家身份和权限。
 - 保存聊天记录和审计日志。
 - 封装 MySQL 查询工具。
+- 封装高德地图 MCP 查询工具。
 - 管理知识库索引。
 
 ## Agent 职责
@@ -46,6 +68,7 @@ POST /api/chat
 - 读取并使用同一 `session_id` 下的最近对话历史。
 - 决定是否需要查询玩家数据。
 - 决定是否需要检索知识库。
+- 决定是否需要查询高德地图 MCP。
 - 整合工具结果生成客服回复。
 - 在回复完成后写入本轮对话记忆。
 - 在无法确认或高风险场景下转人工。
@@ -62,6 +85,7 @@ analyze_safety
     -> decide_action_with_llm
       -> classify_question（LLM 未启用或决策失败时回退）
       -> retrieve_player_data
+      -> retrieve_map_data
       -> retrieve_knowledge
       -> generate_direct_reply
       -> route_question
@@ -73,10 +97,11 @@ analyze_safety
 节点职责：
 
 - `analyze_safety`：识别拒答、转人工和允许继续处理的请求。
-- `decide_action_with_llm`：调用 DeepSeek/OpenAI-compatible 模型，让模型选择受控动作。
+- `decide_action_with_llm`：调用前端选择的 OpenAI-compatible 模型，让模型选择受控动作。
 - `classify_question`：根据玩家问题判断转人工、知识库或普通咨询。
 - `retrieve_knowledge`：查询 Markdown/HTML 知识库。
 - `retrieve_player_data`：查询 MySQL 玩家基础资料。
+- `retrieve_map_data`：通过后端受控工具调用高德地图 MCP。
 - `generate_knowledge_reply`：使用知识库片段生成带来源回复。
 - `generate_llm_final_reply`：模型结合玩家问题和工具结果生成最终回复。
 - `generate_refusal_reply`：拒绝泄露系统提示词、密钥或内部配置。
@@ -97,14 +122,56 @@ analyze_safety
 
 ## LLM 决策边界
 
+前端只允许传模型 provider 代号，例如 `deepseek` 或 `qwen`。后端根据 `LLM_ALLOWED_PROVIDERS`
+白名单选择配置，不接受前端传入 `base_url`、`api_key` 或任意模型名。
+
+当前支持：
+
+```text
+deepseek -> DeepSeek OpenAI-compatible Chat Completions
+qwen     -> 阿里云百炼/千问 OpenAI-compatible Chat Completions
+```
+
 模型只允许输出动作，不允许执行工具：
 
 - `knowledge_base`：后端查询知识库。
 - `mysql_player_profile`：后端查询玩家基础资料。
+- `mysql_players_list`：后端查询玩家列表。
+- `avatar_generate`：根据玩家资料生成本地 PNG 头像。
+- `amap_place_search`：通过高德 MCP 查询地点/POI。
+- `amap_geo`：通过高德 MCP 将地址或地名解析为经纬度。
+- `amap_route`：通过高德 MCP 查询路线，支持起终点为地址或高德经纬度。
+- `amap_navigation`：生成高德 URI API 导航链接，支持目的地为地址或高德经纬度。
+- `amap_weather`：通过高德 MCP 查询城市天气。
+- `ask_clarification`：要求玩家补充必要信息。
 - `handoff`：转人工。
 - `direct_answer`：直接回复。
 
-如果模型未启用、调用失败、返回非法 JSON 或返回未知动作，系统回退到规则流程。
+如果模型未启用、调用失败、返回非法 JSON、返回未知动作或前端传入未允许的 provider，
+系统回退到默认 provider 或规则流程。
+
+## 高德地图 MCP
+
+高德地图 MCP 默认关闭。启用后，后端作为 MCP Client 调用高德官方 Streamable HTTP MCP 服务：
+
+```env
+AMAP_MCP_ENABLED=true
+AMAP_MCP_URL=https://mcp.amap.com/mcp?key=你的高德 Web 服务 Key
+AMAP_MCP_TIMEOUT_SECONDS=15
+```
+
+Agent 不直接访问高德 MCP。模型只能选择受控地图动作，并提供结构化参数。
+后端再映射到高德 MCP 工具或高德 URI API：
+
+```text
+amap_place_search -> maps_text_search
+amap_geo          -> maps_geo
+amap_route        -> maps_direction_driving / maps_direction_walking / maps_bicycling / maps_direction_transit_integrated
+amap_navigation   -> maps_geo + https://uri.amap.com/navigation
+amap_weather      -> maps_weather
+```
+
+如果未启用或调用失败，后端返回明确的不可用提示，不让模型编造地图结果。
 
 ## 会话记忆
 
@@ -112,7 +179,7 @@ analyze_safety
 
 - 按 `session_id` 隔离。
 - 默认保留最近 10 条 user / assistant 消息。
-- 记忆会注入 DeepSeek 决策 prompt 和最终回复 prompt。
+- 记忆会注入当前选定模型的决策 prompt 和最终回复 prompt。
 - 后端进程重启后记忆会丢失。
 
 该方案适合本地开发和第一版多轮对话验证。正式环境建议迁移到 MySQL 或 Redis，并增加过期时间、用户权限和审计策略。

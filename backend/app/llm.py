@@ -13,6 +13,14 @@ class LLMResponse:
     content: str
 
 
+@dataclass(frozen=True)
+class LLMProviderConfig:
+    provider: str
+    base_url: str
+    api_key: str
+    model: str
+
+
 class LLMClientProtocol(Protocol):
     async def decide_action(self, messages: list[dict[str, str]]) -> AgentDecision:
         raise NotImplementedError
@@ -112,14 +120,53 @@ def extract_stream_delta(line: str) -> str | None:
     return None
 
 
-def build_llm_client() -> LLMClientProtocol | None:
+def build_llm_client(model_provider: str | None = None) -> LLMClientProtocol | None:
     settings = get_settings()
-    if not settings.llm_enabled or not settings.llm_api_key:
+    if not settings.llm_enabled:
+        return None
+
+    provider_config = _provider_config(settings, _select_provider(settings, model_provider))
+    if not provider_config.api_key:
         return None
 
     return OpenAICompatibleLLMClient(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.llm_model,
+        base_url=provider_config.base_url,
+        api_key=provider_config.api_key,
+        model=provider_config.model,
         timeout_seconds=settings.llm_timeout_seconds,
     )
+
+
+def _select_provider(settings, requested_provider: str | None) -> str:
+    allowed_providers = _split_csv(settings.llm_allowed_providers)
+    default_provider = settings.llm_default_provider.strip().lower() or settings.llm_provider
+    default_provider = default_provider.strip().lower()
+    requested = (requested_provider or default_provider).strip().lower()
+
+    if requested in allowed_providers:
+        return requested
+    if default_provider in allowed_providers:
+        return default_provider
+    return allowed_providers[0] if allowed_providers else "deepseek"
+
+
+def _provider_config(settings, provider: str) -> LLMProviderConfig:
+    if provider == "qwen":
+        return LLMProviderConfig(
+            provider="qwen",
+            base_url=settings.qwen_base_url,
+            api_key=settings.qwen_api_key,
+            model=settings.qwen_model,
+        )
+
+    legacy_matches_deepseek = settings.llm_provider.strip().lower() == "deepseek"
+    return LLMProviderConfig(
+        provider="deepseek",
+        base_url=settings.deepseek_base_url or (settings.llm_base_url if legacy_matches_deepseek else ""),
+        api_key=settings.deepseek_api_key or (settings.llm_api_key if legacy_matches_deepseek else ""),
+        model=settings.deepseek_model or (settings.llm_model if legacy_matches_deepseek else ""),
+    )
+
+
+def _split_csv(raw_value: str) -> list[str]:
+    return [item.strip().lower() for item in raw_value.split(",") if item.strip()]

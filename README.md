@@ -122,6 +122,29 @@ POST /api/chat/stream
 POST /api/chat
 ```
 
+聊天响应除了 `reply` 文本，还支持结构化表格：
+
+```json
+{
+  "reply": "查询到以下数据：",
+  "tables": [
+    {
+      "title": "玩家列表",
+      "columns": [
+        { "key": "player_id", "label": "玩家ID" },
+        { "key": "nickname", "label": "昵称" }
+      ],
+      "rows": [
+        { "player_id": "1", "nickname": "玩家一" }
+      ]
+    }
+  ]
+}
+```
+
+前端会用真正的 HTML `<table>` 渲染 `tables`，避免让大模型用 Markdown 或空格画表格导致错位。
+当前已支持把 MySQL 玩家列表和高德地图地点搜索结果转换为表格。
+
 ## 安全边界
 
 - Agent 不直接生成 SQL 查询数据库。
@@ -132,29 +155,40 @@ POST /api/chat
 - 退款、投诉、申诉等问题默认转人工。
 - 回复中会遮蔽手机号和身份证号。
 
-## DeepSeek 大模型
+## 大模型配置和切换
 
-后端支持 DeepSeek / OpenAI-compatible Chat Completions API。默认关闭，未配置时继续使用规则流程。
+后端支持 DeepSeek 和千问的 OpenAI-compatible Chat Completions API。默认关闭，未配置时继续使用规则流程。
+前端聊天界面可以选择 `DeepSeek` 或 `千问`，但前端只会发送 `model_provider` 代号；真实 `base_url`、模型名和 API Key 只由后端 `.env` 控制。
 
 启用方式：
 
 ```env
 LLM_ENABLED=true
-LLM_PROVIDER=deepseek
-LLM_BASE_URL=https://api.deepseek.com
-LLM_API_KEY=你的 DeepSeek API Key
-LLM_MODEL=deepseek-v4-flash
+LLM_DEFAULT_PROVIDER=deepseek
+LLM_ALLOWED_PROVIDERS=deepseek,qwen
 LLM_TIMEOUT_SECONDS=20
+
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_API_KEY=你的 DeepSeek API Key
+DEEPSEEK_MODEL=deepseek-v4-flash
+
+QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+QWEN_API_KEY=你的阿里云百炼 API Key
+QWEN_MODEL=qwen-plus
 ```
+
+旧的 `LLM_PROVIDER`、`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 仍作为 DeepSeek 兼容配置保留，建议新配置使用 `DEEPSEEK_*` 和 `QWEN_*`。
 
 启用后流程：
 
 ```text
 玩家问题
+  -> 前端发送 model_provider
   -> 安全检查
-  -> DeepSeek 输出动作 JSON
+  -> 后端按白名单选择 DeepSeek 或千问
+  -> 选定模型输出动作 JSON
   -> 后端执行受控工具
-  -> DeepSeek 根据工具结果生成最终回复
+  -> 选定模型根据工具结果生成最终回复
   -> 后端脱敏后返回前端
 ```
 
@@ -163,11 +197,44 @@ LLM_TIMEOUT_SECONDS=20
 ```text
 knowledge_base
 mysql_player_profile
+mysql_players_list
+avatar_generate
+amap_place_search
+amap_geo
+amap_route
+amap_navigation
+amap_weather
+ask_clarification
 handoff
 direct_answer
 ```
 
-模型不能生成 SQL，也不能直接访问数据库。
+模型不能生成 SQL，也不能直接访问数据库或外部 MCP。数据库和地图查询都必须通过后端受控工具执行。
+
+## 高德地图 MCP
+
+后端支持通过高德地图 MCP 查询地点、地址、路线和天气，并可生成高德地图导航链接，默认关闭。
+
+启用方式：
+
+```env
+AMAP_MCP_ENABLED=true
+AMAP_MCP_URL=https://mcp.amap.com/mcp?key=你的高德 Web 服务 Key
+AMAP_MCP_TIMEOUT_SECONDS=15
+```
+
+当前受控地图工具：
+
+```text
+amap_place_search -> 高德 maps_text_search，查询地点/POI
+amap_geo          -> 高德 maps_geo，地址或地名转经纬度
+amap_route        -> 高德路线规划工具，支持起终点为地址或高德经纬度
+amap_navigation   -> 高德 URI API 导航链接，支持目的地为地址或高德经纬度
+amap_weather      -> 高德 maps_weather，按城市名或 adcode 查询天气
+```
+
+玩家询问“附近网吧在哪里”“杭州西湖在哪里”“从 A 到 B 怎么走”“导航到天安门”“北京天气怎么样”这类问题时，
+Agent 会先让大模型决策是否需要地图工具，再由后端调用高德 MCP，最后把工具结果交给模型生成客服回复。
 
 ## 会话记忆
 

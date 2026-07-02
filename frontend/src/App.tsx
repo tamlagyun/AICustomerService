@@ -1,6 +1,13 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
-import { ChatImage, ChatSource, sendChatMessageStream } from "./api/chat";
+import {
+  ChatImage,
+  ChatSource,
+  ChatTable,
+  DEFAULT_MODEL_PROVIDER,
+  ModelProvider,
+  sendChatMessageStream,
+} from "./api/chat";
 
 type ChatMessage = {
   role: "player" | "agent";
@@ -9,6 +16,7 @@ type ChatMessage = {
   statuses?: string[];
   sources?: ChatSource[];
   images?: ChatImage[];
+  tables?: ChatTable[];
 };
 
 const initialMessages: ChatMessage[] = [
@@ -21,13 +29,23 @@ const initialMessages: ChatMessage[] = [
 export function App() {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
+  const [modelProvider, setModelProvider] = useState<ModelProvider>(DEFAULT_MODEL_PROVIDER);
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const latestMessageRef = useRef<HTMLDivElement | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollMessagesToBottom = useCallback(() => {
+    const messageList = messageListRef.current;
+    if (!messageList) {
+      return;
+    }
+
+    messageList.scrollTop = messageList.scrollHeight;
+  }, []);
 
   useEffect(() => {
-    latestMessageRef.current?.scrollIntoView?.({ behavior: "smooth", block: "end" });
-  }, [messages]);
+    scrollMessagesToBottom();
+  }, [messages, scrollMessagesToBottom]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -46,7 +64,7 @@ export function App() {
     ]);
 
     try {
-      await sendChatMessageStream(text, {
+      await sendChatMessageStream(text, modelProvider, {
         onToken(token) {
           setMessages((current) => updateLastAgentMessage(current, (message) => ({
             ...message,
@@ -67,6 +85,7 @@ export function App() {
             statuses: [...(message.statuses ?? []), "已完成"],
             sources: response.sources,
             images: response.images,
+            tables: response.tables,
           })));
         },
       });
@@ -85,12 +104,29 @@ export function App() {
             <h1>聊天客服 AI Agent</h1>
             <p>面向游戏玩家咨询、数据查询和知识库问答</p>
           </div>
-          <span className="status-pill">本地开发</span>
+          <div className="header-actions">
+            <label className="model-select">
+              <span>模型</span>
+              <select
+                aria-label="选择大模型"
+                value={modelProvider}
+                disabled={isSending}
+                onChange={(event) => setModelProvider(event.target.value as ModelProvider)}
+              >
+                <option value="deepseek">DeepSeek</option>
+                <option value="qwen">千问</option>
+              </select>
+            </label>
+            <span className="status-pill">本地开发</span>
+          </div>
         </header>
 
-        <div className="message-list">
+        <div className="message-list" ref={messageListRef}>
           {messages.map((message, index) => (
-            <article key={`${message.role}-${index}`} className={`message ${message.role}`}>
+            <article
+              key={`${message.role}-${index}`}
+              className={`message ${message.role}${message.tables?.length ? " has-table" : ""}`}
+            >
               <span>{message.role === "player" ? "玩家" : "客服 AI"}</span>
               <p>{message.content}</p>
               {message.statuses?.map((status, statusIndex) => (
@@ -102,11 +138,19 @@ export function App() {
                 <small key={source.reference}>来源：{source.title}</small>
               ))}
               {message.images?.map((image) => (
-                <img className="message-image" key={image.url} src={image.url} alt={image.alt} />
+                <img
+                  className="message-image"
+                  key={image.url}
+                  src={image.url}
+                  alt={image.alt}
+                  onLoad={scrollMessagesToBottom}
+                />
+              ))}
+              {message.tables?.map((table) => (
+                <TableRenderer key={table.title} table={table} />
               ))}
             </article>
           ))}
-          <div ref={latestMessageRef} aria-hidden="true" />
         </div>
 
         <form className="composer" onSubmit={handleSubmit}>
@@ -125,6 +169,46 @@ export function App() {
       </section>
     </main>
   );
+}
+
+function TableRenderer({ table }: { table: ChatTable }) {
+  return (
+    <section className="message-table" aria-label={table.title}>
+      <strong>{table.title}</strong>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              {table.columns.map((column) => (
+                <th key={column.key} scope="col">
+                  {column.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {table.rows.map((row, rowIndex) => (
+              <tr key={rowIndex}>
+                {table.columns.map((column) => (
+                  <td key={column.key}>{formatTableCell(row[column.key])}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function formatTableCell(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return JSON.stringify(value);
 }
 
 function updateLastAgentMessage(

@@ -58,6 +58,43 @@ def test_parse_agent_decision_accepts_avatar_generate_action() -> None:
     assert decision.final_task == "生成符合玩家个性的头像"
 
 
+def test_parse_agent_decision_accepts_amap_place_search_action() -> None:
+    decision = parse_agent_decision(
+        (
+            '{"action":"amap_place_search","reason":"玩家询问附近地点",'
+            '"arguments":{"keywords":"网吧","city":"北京"},'
+            '"final_task":"回答玩家可选择的附近地点"}'
+        )
+    )
+
+    assert decision.action == AgentAction.AMAP_PLACE_SEARCH
+    assert decision.arguments == {"keywords": "网吧", "city": "北京"}
+    assert decision.final_task == "回答玩家可选择的附近地点"
+
+
+def test_parse_agent_decision_accepts_amap_navigation_action() -> None:
+    decision = parse_agent_decision(
+        (
+            '{"action":"amap_navigation","reason":"玩家要求打开导航",'
+            '"arguments":{"destination":"天安门","city":"北京","mode":"walking"},'
+            '"final_task":"提供高德地图导航链接"}'
+        )
+    )
+
+    assert decision.action == AgentAction.AMAP_NAVIGATION
+    assert decision.arguments == {"destination": "天安门", "city": "北京", "mode": "walking"}
+    assert decision.final_task == "提供高德地图导航链接"
+
+
+def test_parse_agent_decision_accepts_amap_weather_action() -> None:
+    decision = parse_agent_decision(
+        '{"action":"amap_weather","reason":"玩家询问天气","arguments":{"city":"北京"}}'
+    )
+
+    assert decision.action == AgentAction.AMAP_WEATHER
+    assert decision.arguments == {"city": "北京"}
+
+
 def test_parse_agent_decision_falls_back_on_invalid_json() -> None:
     decision = parse_agent_decision("我觉得应该查询玩家资料")
 

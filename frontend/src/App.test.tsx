@@ -61,6 +61,7 @@ describe("App", () => {
         body: JSON.stringify({
           session_id: "local-session",
           message: "充值不到账怎么办？",
+          model_provider: "deepseek",
         }),
       }),
     );
@@ -99,12 +100,69 @@ describe("App", () => {
     expect(image).toHaveAttribute("src", "/generated/avatars/player-1.png");
   });
 
+  it("renders tables returned by the stream done event", async () => {
+    const encoder = new TextEncoder();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode('event: token\ndata: {"text":"查询到以下景点"}\n\n'));
+            controller.enqueue(
+              encoder.encode(
+                'event: done\ndata: {"sources":[],"handoff":false,"tables":[{"title":"高德地图地点结果","columns":[{"key":"name","label":"名称"},{"key":"address","label":"地址"}],"rows":[{"name":"西湖风景名胜区","address":"杭州市西湖区龙井路1号"}]}]}\n\n',
+              ),
+            );
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(screen.getByLabelText("输入玩家问题"), "杭州景点用表格显示");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("高德地图地点结果")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "名称" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "西湖风景名胜区" })).toBeInTheDocument();
+  });
+
+  it("sends the selected qwen model provider to the chat stream API", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode('event: token\ndata: {"text":"你好"}\n\n'));
+            controller.enqueue(encoder.encode('event: done\ndata: {"sources":[],"handoff":false}\n\n'));
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.selectOptions(screen.getByLabelText("选择大模型"), "qwen");
+    await user.type(screen.getByLabelText("输入玩家问题"), "你好");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chat/stream",
+      expect.objectContaining({
+        body: JSON.stringify({
+          session_id: "local-session",
+          message: "你好",
+          model_provider: "qwen",
+        }),
+      }),
+    );
+  });
+
   it("scrolls to the latest message while streaming updates arrive", async () => {
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(Element.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
-    });
     const encoder = new TextEncoder();
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response(
@@ -122,14 +180,23 @@ describe("App", () => {
     );
     const user = userEvent.setup();
     render(<App />);
-    scrollIntoView.mockClear();
+    const messageList = document.querySelector(".message-list") as HTMLDivElement;
+    Object.defineProperty(messageList, "scrollHeight", {
+      configurable: true,
+      value: 2400,
+    });
+    Object.defineProperty(messageList, "clientHeight", {
+      configurable: true,
+      value: 400,
+    });
+    messageList.scrollTop = 0;
 
     await user.type(screen.getByLabelText("输入玩家问题"), "请帮我查询资料");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("第一段第二段")).toBeInTheDocument();
     await waitFor(() => {
-      expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "end" });
+      expect(messageList.scrollTop).toBe(2400);
     });
   });
 

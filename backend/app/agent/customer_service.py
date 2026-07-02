@@ -11,11 +11,22 @@ from app.config import get_settings
 from app.conversation_memory import ConversationMessage, get_conversation_memory
 from app.knowledge_base import KnowledgeBaseSearch, KnowledgeChunk
 from app.llm import LLMClientProtocol, build_llm_client
+from app.map_tools import MapToolResult, build_map_tools
 from app.player_data import PlayerDataResult, PlayerDataStatus, build_player_data_tools
 from app.safety import SafetyAction, SafetyDecision, analyze_safety, redact_sensitive_text
-from app.schemas import ChatImage, ChatResponse, ChatSource
+from app.schemas import ChatImage, ChatResponse, ChatSource, ChatTable
+from app.table_adapter import tables_for_map_result, tables_for_player_data_result
 
-QuestionType = Literal["handoff", "knowledge", "general", "refuse", "player_data", "direct_answer"]
+QuestionType = Literal[
+    "handoff",
+    "knowledge",
+    "general",
+    "refuse",
+    "player_data",
+    "direct_answer",
+    "map",
+    "players_list",
+]
 
 
 class CustomerServiceState(TypedDict, total=False):
@@ -30,11 +41,13 @@ class CustomerServiceState(TypedDict, total=False):
     use_llm_final_reply: bool
     knowledge_results: list[KnowledgeChunk]
     player_data_result: PlayerDataResult
+    map_result: MapToolResult
     avatar_result: AvatarGenerationResult
     conversation_history: list[ConversationMessage]
     reply: str
     sources: list[ChatSource]
     images: list[ChatImage]
+    tables: list[ChatTable]
     handoff: bool
     status_queue: asyncio.Queue[str]
 
@@ -47,12 +60,14 @@ def build_customer_service_graph():
     workflow.add_node("retrieve_knowledge", retrieve_knowledge)
     workflow.add_node("retrieve_player_data", retrieve_player_data)
     workflow.add_node("retrieve_players_list", retrieve_players_list)
+    workflow.add_node("retrieve_map_data", retrieve_map_data)
     workflow.add_node("generate_avatar", generate_avatar)
     workflow.add_node("generate_refusal_reply", generate_refusal_reply)
     workflow.add_node("generate_handoff_reply", generate_handoff_reply)
     workflow.add_node("generate_general_reply", generate_general_reply)
     workflow.add_node("generate_knowledge_reply", generate_knowledge_reply)
     workflow.add_node("generate_player_data_reply", generate_player_data_reply)
+    workflow.add_node("generate_map_reply", generate_map_reply)
     workflow.add_node("generate_avatar_reply", generate_avatar_reply)
     workflow.add_node("generate_direct_reply", generate_direct_reply)
     workflow.add_node("generate_no_knowledge_reply", generate_no_knowledge_reply)
@@ -81,6 +96,7 @@ def build_customer_service_graph():
             "player_data": "retrieve_player_data",
             "players_list": "retrieve_players_list",
             "avatar": "retrieve_player_data",
+            "map": "retrieve_map_data",
         },
     )
     workflow.add_conditional_edges(
@@ -89,8 +105,10 @@ def build_customer_service_graph():
         {
             "handoff": "generate_handoff_reply",
             "player_data": "retrieve_player_data",
+            "players_list": "retrieve_players_list",
             "knowledge": "retrieve_knowledge",
             "general": "retrieve_knowledge",
+            "map": "retrieve_map_data",
         },
     )
     workflow.add_conditional_edges(
@@ -111,6 +129,7 @@ def build_customer_service_graph():
         },
     )
     workflow.add_edge("retrieve_players_list", "generate_player_data_reply")
+    workflow.add_edge("retrieve_map_data", "generate_map_reply")
     workflow.add_edge("generate_avatar", "generate_avatar_reply")
     workflow.add_edge("generate_refusal_reply", "finalize")
     workflow.add_edge("generate_handoff_reply", "finalize")
@@ -134,6 +153,11 @@ def build_customer_service_graph():
         route_final_reply,
         {"llm": "generate_llm_final_reply", "final": "finalize"},
     )
+    workflow.add_conditional_edges(
+        "generate_map_reply",
+        route_final_reply,
+        {"llm": "generate_llm_final_reply", "final": "finalize"},
+    )
     workflow.add_edge("generate_direct_reply", "finalize")
     workflow.add_edge("generate_no_knowledge_reply", "finalize")
     workflow.add_edge("generate_llm_final_reply", "finalize")
@@ -146,6 +170,7 @@ async def run_customer_service_agent(
     session_id: str,
     message: str,
     player_id: str | None = None,
+    model_provider: str | None = None,
     llm_client: LLMClientProtocol | None = None,
     status_queue: asyncio.Queue[str] | None = None,
 ) -> ChatResponse:
@@ -162,7 +187,7 @@ async def run_customer_service_agent(
             "player_id": player_id,
             "message": message,
             "conversation_history": memory.get_recent_messages(session_id),
-            "llm_client": llm_client if llm_client is not None else build_llm_client(),
+            "llm_client": llm_client if llm_client is not None else build_llm_client(model_provider),
             "status_queue": status_queue,
         }
     )
@@ -171,6 +196,7 @@ async def run_customer_service_agent(
         sources=final_state.get("sources", []),
         handoff=final_state.get("handoff", False),
         images=final_state.get("images", []),
+        tables=final_state.get("tables", []),
     )
     _record_conversation_exchange(session_id, message, response.reply)
     return response
@@ -195,11 +221,12 @@ async def stream_customer_service_agent(
     session_id: str,
     message: str,
     player_id: str | None = None,
+    model_provider: str | None = None,
     llm_client: LLMClientProtocol | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     yield {"event": "status", "data": {"message": "正在分析问题"}}
 
-    base_llm_client = llm_client if llm_client is not None else build_llm_client()
+    base_llm_client = llm_client if llm_client is not None else build_llm_client(model_provider)
     token_queue: asyncio.Queue[str] = asyncio.Queue()
     status_queue: asyncio.Queue[str] = asyncio.Queue()
     streaming_llm_client = (
@@ -211,6 +238,7 @@ async def stream_customer_service_agent(
             session_id=session_id,
             player_id=player_id,
             message=message,
+            model_provider=model_provider,
             llm_client=streaming_llm_client,
             status_queue=status_queue,
         )
@@ -240,6 +268,7 @@ async def stream_customer_service_agent(
             "sources": [source.model_dump() for source in response.sources],
             "handoff": response.handoff,
             "images": [image.model_dump() for image in response.images],
+            "tables": [table.model_dump() for table in response.tables],
         },
     }
 
@@ -295,6 +324,7 @@ def route_llm_decision(
     "player_data",
     "players_list",
     "avatar",
+    "map",
 ]:
     decision = state.get("llm_decision")
     if decision is None or decision.action == AgentAction.FALLBACK:
@@ -313,6 +343,14 @@ def route_llm_decision(
         return "players_list"
     if decision.action == AgentAction.AVATAR_GENERATE:
         return "avatar"
+    if decision.action in {
+        AgentAction.AMAP_PLACE_SEARCH,
+        AgentAction.AMAP_GEO,
+        AgentAction.AMAP_ROUTE,
+        AgentAction.AMAP_NAVIGATION,
+        AgentAction.AMAP_WEATHER,
+    }:
+        return "map"
     return "fallback"
 
 
@@ -321,12 +359,19 @@ def classify_question(state: CustomerServiceState) -> CustomerServiceState:
     normalized_message = state["normalized_message"]
     question_type: QuestionType = "general"
 
-    if any(keyword in normalized_message for keyword in ["玩家资料", "玩家信息", "角色资料", "角色信息"]):
+    if _looks_like_players_list_query(normalized_message):
+        question_type = "players_list"
+    elif any(keyword in normalized_message for keyword in ["玩家资料", "玩家信息", "角色资料", "角色信息"]):
         question_type = "player_data"
     elif state.get("player_id") and any(keyword in normalized_message for keyword in ["资料", "信息"]):
         question_type = "player_data"
     elif any(keyword in normalized_message for keyword in ["充值", "不到账", "订单", "封禁"]):
         question_type = "knowledge"
+    elif any(
+        keyword in normalized_message
+        for keyword in ["地图", "地址", "在哪里", "附近", "怎么去", "路线", "距离", "导航", "天气"]
+    ):
+        question_type = "map"
 
     return {
         **state,
@@ -337,6 +382,18 @@ def classify_question(state: CustomerServiceState) -> CustomerServiceState:
 
 def route_question(state: CustomerServiceState) -> QuestionType:
     return state.get("question_type", "general")
+
+
+def _looks_like_players_list_query(message: str) -> bool:
+    normalized = message.lower()
+    asks_many = any(keyword in message for keyword in ["所有", "全部", "列表", "全量"])
+    asks_player_rows = any(keyword in message for keyword in ["玩家", "资料", "数据", "信息"])
+
+    if "players" in normalized and asks_many:
+        return True
+    if "数据库" in message and asks_many and asks_player_rows:
+        return True
+    return any(keyword in message for keyword in ["所有玩家", "全部玩家", "玩家列表"])
 
 
 def route_after_knowledge(state: CustomerServiceState) -> Literal["knowledge", "general", "fallback"]:
@@ -383,6 +440,50 @@ def retrieve_players_list(state: CustomerServiceState) -> CustomerServiceState:
     return {
         **state,
         "player_data_result": result,
+        "use_llm_final_reply": _should_use_llm_final_reply(state),
+    }
+
+
+async def retrieve_map_data(state: CustomerServiceState) -> CustomerServiceState:
+    _emit_status(state, "正在调用高德地图 MCP")
+    decision = state.get("llm_decision")
+    map_tools = build_map_tools()
+
+    if decision is not None and decision.action == AgentAction.AMAP_GEO:
+        result = await map_tools.geocode(
+            _string_argument(state, "address"),
+            city=_string_argument(state, "city"),
+        )
+    elif decision is not None and decision.action == AgentAction.AMAP_ROUTE:
+        result = await map_tools.route(
+            origin=_string_argument(state, "origin"),
+            destination=_string_argument(state, "destination"),
+            mode=_string_argument(state, "mode"),
+            city=_string_argument(state, "city"),
+            cityd=_string_argument(state, "cityd"),
+        )
+    elif decision is not None and decision.action == AgentAction.AMAP_NAVIGATION:
+        result = await map_tools.navigation(
+            destination=_string_argument(state, "destination"),
+            destination_name=_string_argument(state, "destination_name")
+            or _string_argument(state, "destination"),
+            origin=_string_argument(state, "origin"),
+            origin_name=_string_argument(state, "origin_name"),
+            mode=_string_argument(state, "mode"),
+            city=_string_argument(state, "city"),
+        )
+    elif decision is not None and decision.action == AgentAction.AMAP_WEATHER:
+        result = await map_tools.weather(_string_argument(state, "city"))
+    else:
+        result = await map_tools.search_place(
+            _map_keywords_for_tool_call(state),
+            city=_string_argument(state, "city"),
+            types=_string_argument(state, "types"),
+        )
+
+    return {
+        **state,
+        "map_result": result,
         "use_llm_final_reply": _should_use_llm_final_reply(state),
     }
 
@@ -440,10 +541,38 @@ def generate_direct_reply(state: CustomerServiceState) -> CustomerServiceState:
 
 def generate_player_data_reply(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在整理工具结果")
+    player_data_result = state["player_data_result"]
     return {
         **state,
-        "reply": state["player_data_result"].summary,
+        "reply": player_data_result.summary,
         "sources": [],
+        "tables": tables_for_player_data_result(
+            player_data_result,
+            tool_name=_tool_name_for_prompt(state),
+        ),
+        "handoff": False,
+    }
+
+
+def generate_map_reply(state: CustomerServiceState) -> CustomerServiceState:
+    _emit_status(state, "正在整理地图结果")
+    map_result = state["map_result"]
+    sources = []
+    tool_name = _map_tool_name(map_result)
+    if tool_name:
+        sources.append(
+            ChatSource(
+                title="高德地图 MCP",
+                source_type="amap_mcp",
+                reference=tool_name,
+            )
+        )
+
+    return {
+        **state,
+        "reply": map_result.summary,
+        "sources": sources,
+        "tables": tables_for_map_result(map_result),
         "handoff": False,
     }
 
@@ -590,13 +719,24 @@ def _decision_messages(
             "role": "system",
             "content": (
                 "你是游戏客服 Agent 的决策器。只允许输出 JSON，不要输出额外文字。"
-                "可选 action: knowledge_base, mysql_player_profile, mysql_players_list, avatar_generate, ask_clarification, handoff, direct_answer。"
+                "可选 action: knowledge_base, mysql_player_profile, mysql_players_list, "
+                "avatar_generate, amap_place_search, amap_geo, amap_route, amap_navigation, amap_weather, "
+                "ask_clarification, handoff, direct_answer。"
                 "不能生成 SQL。数据库查询只能选择 mysql_player_profile 或 mysql_players_list。"
                 "如果需要玩家资料，选择 mysql_player_profile，并在 arguments.player_id 中填写玩家 ID。"
-                "如果用户要求查询 players 表所有数据、全部玩家、玩家列表，选择 mysql_players_list。"
+                "如果用户要求查询 players 表所有数据、数据库中所有资料、数据库全部数据、全部玩家、玩家列表，选择 mysql_players_list。"
                 "mysql_players_list 可选 arguments.limit，默认 100，最大 1000。"
                 "如果用户要求生成头像、形象图、个性头像，选择 avatar_generate；该动作会先通过后端工具查询玩家资料，再生成本地 PNG 头像。"
                 "avatar_generate 需要 arguments.player_id；如果历史对话或当前问题没有明确玩家 ID，应选择 ask_clarification。"
+                "如果玩家询问地点、地址、在哪里、附近有什么地点，选择 amap_place_search，"
+                "arguments.keywords 填地点关键词，arguments.city 可填城市，arguments.types 可填 POI 类型。"
+                "如果玩家要求把地址或地名解析为经纬度，选择 amap_geo，arguments.address 必填，arguments.city 可选。"
+                "如果玩家要求路线、距离或怎么去，选择 amap_route，"
+                "arguments.origin 和 arguments.destination 填起终点地址或高德经纬度，arguments.mode 可填 driving、walking、bicycling 或 transit。"
+                "如果玩家要求打开导航、给导航链接、导航到目的地，选择 amap_navigation，"
+                "arguments.destination 填目的地地址或高德经纬度；如果有起点则填 arguments.origin；mode 可填 driving、walking、bicycling 或 transit。"
+                "如果玩家询问天气，选择 amap_weather，arguments.city 填城市名称或 adcode。"
+                "如果路线或导航缺少起点但可使用当前位置作为起点，可以不填 origin；如果目的地缺失，选择 ask_clarification。"
                 "玩家可能会用“玩家ID”“角色ID”“我的ID”“唯一Key”“ID”等说法表达玩家 ID。"
                 "如果玩家要求查询后继续分析、总结或建议，把最终任务写入 final_task。"
                 "如果玩家 ID 缺失或有多个候选导致歧义，选择 ask_clarification 并在 direct_reply 中反问。"
@@ -639,6 +779,7 @@ def _final_reply_messages(state: CustomerServiceState) -> list[dict[str, str]]:
                 "不要编造工具结果中没有的信息。不要承诺未验证的补偿、退款或封禁解除。"
                 "如果玩家要求分析个性，只能基于工具结果中的 desc 字段和基础资料分析。"
                 "如果工具结果是本地 PNG 头像，只能说明已生成可预览的本地头像，不要声称已调用真实生图模型。"
+                "如果工具结果来自高德地图 MCP 或高德 URI API，只能基于地图工具结果回答地点、地址、路线、导航或天气，不要编造未返回的门店、电话、营业时间或天气。"
                 "如果 desc 或相关字段不足以支持结论，必须明确说明信息不足。"
                 "如果工具结果显示无法查询或未启用，如实说明并引导转人工或补充信息。"
             ),
@@ -701,6 +842,16 @@ def _tool_data_for_prompt(state: CustomerServiceState) -> str:
             }
         )
 
+    map_result = state.get("map_result")
+    if map_result is not None:
+        tools.append(
+            {
+                "tool": _map_tool_name(map_result) or "amap_mcp",
+                "status": map_result.status,
+                "data": map_result.data,
+            }
+        )
+
     if not tools:
         return "{}"
 
@@ -724,7 +875,39 @@ def _tool_name_for_prompt(state: CustomerServiceState) -> str:
     decision = state.get("llm_decision")
     if decision is not None and decision.action == AgentAction.MYSQL_PLAYERS_LIST:
         return "mysql_players_list"
+    if state.get("question_type") == "players_list":
+        return "mysql_players_list"
     return "mysql_player_profile"
+
+
+def _string_argument(state: CustomerServiceState, name: str) -> str | None:
+    decision = state.get("llm_decision")
+    if decision is None or not decision.arguments:
+        return None
+
+    value = decision.arguments.get(name)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _map_keywords_for_tool_call(state: CustomerServiceState) -> str:
+    decision = state.get("llm_decision")
+    if decision is not None and decision.arguments:
+        keywords = decision.arguments.get("keywords")
+        if isinstance(keywords, str) and keywords.strip():
+            return keywords.strip()
+
+    return state.get("normalized_message", state.get("message", ""))
+
+
+def _map_tool_name(map_result: MapToolResult) -> str | None:
+    if not map_result.data:
+        return None
+    tool_name = map_result.data.get("tool")
+    if isinstance(tool_name, str) and tool_name.strip():
+        return tool_name.strip()
+    return None
 
 
 class _StreamingLLMClient:

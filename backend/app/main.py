@@ -38,6 +38,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         session_id=request.session_id,
         player_id=request.player_id,
         message=request.message,
+        model_provider=request.model_provider,
     )
 
 
@@ -49,6 +50,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 session_id=request.session_id,
                 player_id=request.player_id,
                 message=request.message,
+                model_provider=request.model_provider,
             ):
                 yield _format_sse(event["event"], event["data"])
         except Exception:

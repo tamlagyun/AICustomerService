@@ -9,20 +9,40 @@ export type ChatImage = {
   alt: string;
 };
 
+export type ChatTableColumn = {
+  key: string;
+  label: string;
+};
+
+export type ChatTable = {
+  title: string;
+  columns: ChatTableColumn[];
+  rows: Record<string, unknown>[];
+};
+
 export type ChatResponse = {
   reply: string;
   sources: ChatSource[];
   handoff: boolean;
   images: ChatImage[];
+  tables: ChatTable[];
 };
 
-export async function sendChatMessage(message: string): Promise<ChatResponse> {
+export type ModelProvider = "deepseek" | "qwen";
+
+export const DEFAULT_MODEL_PROVIDER: ModelProvider = "deepseek";
+
+export async function sendChatMessage(
+  message: string,
+  modelProvider: ModelProvider = DEFAULT_MODEL_PROVIDER,
+): Promise<ChatResponse> {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       session_id: "local-session",
       message,
+      model_provider: modelProvider,
     }),
   });
 
@@ -35,12 +55,13 @@ export async function sendChatMessage(message: string): Promise<ChatResponse> {
 
 export type ChatStreamHandlers = {
   onToken: (text: string) => void;
-  onDone: (response: Pick<ChatResponse, "sources" | "handoff" | "images">) => void;
+  onDone: (response: Pick<ChatResponse, "sources" | "handoff" | "images" | "tables">) => void;
   onStatus?: (message: string) => void;
 };
 
 export async function sendChatMessageStream(
   message: string,
+  modelProvider: ModelProvider,
   handlers: ChatStreamHandlers,
 ): Promise<void> {
   const response = await fetch("/api/chat/stream", {
@@ -49,6 +70,7 @@ export async function sendChatMessageStream(
     body: JSON.stringify({
       session_id: "local-session",
       message,
+      model_provider: modelProvider,
     }),
   });
 
@@ -101,6 +123,7 @@ function handleSseEvent(rawEvent: string, handlers: ChatStreamHandlers): void {
       sources: Array.isArray(data.sources) ? (data.sources as ChatSource[]) : [],
       handoff: data.handoff === true,
       images: Array.isArray(data.images) ? (data.images as ChatImage[]) : [],
+      tables: Array.isArray(data.tables) ? (data.tables as ChatTable[]) : [],
     });
   }
   if (event === "error") {

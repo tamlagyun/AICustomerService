@@ -2,6 +2,7 @@ from app.agent.customer_service import run_customer_service_agent
 from app.agent.decision import AgentAction, AgentDecision
 from app.avatar_generation import AvatarGenerationResult, AvatarGenerationStatus
 from app.llm import LLMResponse
+from app.map_tools import MapToolResult, MapToolStatus
 from app.player_data import PlayerDataResult, PlayerDataStatus
 
 
@@ -89,6 +90,87 @@ class FakeAvatarGenerator:
             url="/generated/avatars/player-1.png",
             alt="ai大名 的个性头像",
             data={"style": "策略研究型"},
+        )
+
+
+class FakeMapTools:
+    def __init__(self) -> None:
+        self.place_query: dict[str, object] | None = None
+
+    async def search_place(
+        self,
+        keywords: str | None,
+        *,
+        city: str | None = None,
+        types: str | None = None,
+    ) -> MapToolResult:
+        self.place_query = {"keywords": keywords, "city": city, "types": types}
+        return MapToolResult(
+            status=MapToolStatus.FOUND,
+            summary="高德地图查询结果：中关村电竞网吧，地址 北京市海淀区中关村大街 1 号。",
+            data={
+                "tool": "maps_text_search",
+                "arguments": {"keywords": keywords, "city": city, "types": types},
+                "result": {
+                    "structuredContent": {
+                        "pois": [
+                            {
+                                "name": "中关村电竞网吧",
+                                "address": "北京市海淀区中关村大街 1 号",
+                                "type": "休闲娱乐",
+                                "distance": "800",
+                            }
+                        ]
+                    },
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "中关村电竞网吧，地址 北京市海淀区中关村大街 1 号。",
+                        }
+                    ]
+                },
+            },
+        )
+
+    async def navigation(
+        self,
+        *,
+        destination: str | None,
+        destination_name: str | None = None,
+        origin: str | None = None,
+        origin_name: str | None = None,
+        mode: str | None = None,
+        city: str | None = None,
+    ) -> MapToolResult:
+        self.place_query = {
+            "destination": destination,
+            "destination_name": destination_name,
+            "origin": origin,
+            "origin_name": origin_name,
+            "mode": mode,
+            "city": city,
+        }
+        return MapToolResult(
+            status=MapToolStatus.FOUND,
+            summary="高德地图导航链接：https://uri.amap.com/navigation?to=116.397,39.908,天安门&mode=walk",
+            data={
+                "tool": "amap_navigation_uri",
+                "url": "https://uri.amap.com/navigation?to=116.397,39.908,天安门&mode=walk",
+            },
+        )
+
+    async def weather(self, city: str | None) -> MapToolResult:
+        self.place_query = {"city": city}
+        return MapToolResult(
+            status=MapToolStatus.FOUND,
+            summary="高德地图天气查询结果：北京今天晴，气温 26 到 34 度。",
+            data={
+                "tool": "maps_weather",
+                "arguments": {"city": city},
+                "result": {
+                    "content": [{"type": "text", "text": "北京今天晴，气温 26 到 34 度。"}]
+                },
+            },
         )
 
 
@@ -221,10 +303,32 @@ async def test_llm_agent_uses_players_list_action_and_limit(monkeypatch) -> None
 
     assert player_tools.requested_limit == 1000
     assert response.reply == "当前玩家中包含进攻型和探索型玩家。"
+    assert len(response.tables) == 1
+    assert response.tables[0].title == "玩家列表"
+    assert response.tables[0].rows[0]["nickname"] == "ai大名"
     assert llm_client.final_messages is not None
     final_prompt = llm_client.final_messages[-1]["content"]
     assert "mysql_players_list" in final_prompt
     assert "进攻型玩家" in final_prompt
+
+
+async def test_local_rules_route_database_all_profiles_to_players_list(monkeypatch) -> None:
+    player_tools = FakePlayerDataTools()
+    monkeypatch.setattr(
+        "app.agent.customer_service.build_player_data_tools",
+        lambda: player_tools,
+    )
+
+    response = await run_customer_service_agent(
+        session_id="session-1",
+        message="查询数据库中所有的资料并且根据desc进行分类，用表格显示出来",
+    )
+
+    assert player_tools.requested_limit == 100
+    assert "基础客服 Agent" not in response.reply
+    assert len(response.tables) == 1
+    assert response.tables[0].title == "玩家列表"
+    assert response.tables[0].rows[0]["desc"] == "进攻型玩家"
 
 
 async def test_llm_agent_generates_avatar_from_player_profile(monkeypatch) -> None:
@@ -268,6 +372,105 @@ async def test_llm_agent_generates_avatar_from_player_profile(monkeypatch) -> No
     assert "/generated/avatars/player-1.png" in final_prompt
 
 
+async def test_llm_agent_uses_amap_place_search_action(monkeypatch) -> None:
+    map_tools = FakeMapTools()
+    monkeypatch.setattr(
+        "app.agent.customer_service.build_map_tools",
+        lambda: map_tools,
+    )
+    llm_client = FakeLLMClient(
+        decision=AgentDecision(
+            action=AgentAction.AMAP_PLACE_SEARCH,
+            reason="玩家询问附近地点",
+            arguments={"keywords": "网吧", "city": "北京"},
+            final_task="回答玩家可选择的附近地点",
+        ),
+        final_reply="可以考虑中关村电竞网吧，地址在北京市海淀区中关村大街 1 号。",
+    )
+
+    response = await run_customer_service_agent(
+        session_id="session-1",
+        message="北京附近有没有网吧？",
+        llm_client=llm_client,
+    )
+
+    assert map_tools.place_query == {"keywords": "网吧", "city": "北京", "types": None}
+    assert response.reply == "可以考虑中关村电竞网吧，地址在北京市海淀区中关村大街 1 号。"
+    assert response.sources[0].source_type == "amap_mcp"
+    assert response.sources[0].reference == "maps_text_search"
+    assert len(response.tables) == 1
+    assert response.tables[0].title == "高德地图地点结果"
+    assert response.tables[0].rows[0]["name"] == "中关村电竞网吧"
+    assert llm_client.final_messages is not None
+    final_prompt = llm_client.final_messages[-1]["content"]
+    assert "高德地图查询结果" in final_prompt
+    assert "maps_text_search" in final_prompt
+
+
+async def test_llm_agent_uses_amap_navigation_action(monkeypatch) -> None:
+    map_tools = FakeMapTools()
+    monkeypatch.setattr(
+        "app.agent.customer_service.build_map_tools",
+        lambda: map_tools,
+    )
+    llm_client = FakeLLMClient(
+        decision=AgentDecision(
+            action=AgentAction.AMAP_NAVIGATION,
+            reason="玩家要求导航到目的地",
+            arguments={"destination": "天安门", "city": "北京", "mode": "walking"},
+            final_task="提供高德地图导航链接",
+        ),
+        final_reply="这是高德地图导航链接：https://uri.amap.com/navigation?to=116.397,39.908,天安门&mode=walk",
+    )
+
+    response = await run_customer_service_agent(
+        session_id="session-1",
+        message="导航到北京天安门",
+        llm_client=llm_client,
+    )
+
+    assert map_tools.place_query == {
+        "destination": "天安门",
+        "destination_name": "天安门",
+        "origin": None,
+        "origin_name": None,
+        "mode": "walking",
+        "city": "北京",
+    }
+    assert "高德地图导航链接" in response.reply
+    assert response.sources[0].reference == "amap_navigation_uri"
+    assert llm_client.final_messages is not None
+    assert "amap_navigation_uri" in llm_client.final_messages[-1]["content"]
+
+
+async def test_llm_agent_uses_amap_weather_action(monkeypatch) -> None:
+    map_tools = FakeMapTools()
+    monkeypatch.setattr(
+        "app.agent.customer_service.build_map_tools",
+        lambda: map_tools,
+    )
+    llm_client = FakeLLMClient(
+        decision=AgentDecision(
+            action=AgentAction.AMAP_WEATHER,
+            reason="玩家询问天气",
+            arguments={"city": "北京"},
+        ),
+        final_reply="北京今天晴，气温 26 到 34 度，适合出行。",
+    )
+
+    response = await run_customer_service_agent(
+        session_id="session-1",
+        message="北京今天天气怎么样？",
+        llm_client=llm_client,
+    )
+
+    assert map_tools.place_query == {"city": "北京"}
+    assert response.reply == "北京今天晴，气温 26 到 34 度，适合出行。"
+    assert response.sources[0].reference == "maps_weather"
+    assert llm_client.final_messages is not None
+    assert "maps_weather" in llm_client.final_messages[-1]["content"]
+
+
 async def test_llm_agent_direct_answer_does_not_call_final_generation() -> None:
     llm_client = FakeLLMClient(
         decision=AgentDecision(
@@ -287,6 +490,24 @@ async def test_llm_agent_direct_answer_does_not_call_final_generation() -> None:
 
     assert response.reply == "你好，请描述你的问题。"
     assert llm_client.final_messages is None
+
+
+async def test_agent_builds_llm_client_with_requested_provider(monkeypatch) -> None:
+    requested_providers: list[str | None] = []
+
+    def build_client(model_provider: str | None = None):
+        requested_providers.append(model_provider)
+        return None
+
+    monkeypatch.setattr("app.agent.customer_service.build_llm_client", build_client)
+
+    await run_customer_service_agent(
+        session_id="provider-session",
+        message="你好",
+        model_provider="qwen",
+    )
+
+    assert requested_providers == ["qwen"]
 
 
 async def test_llm_agent_decision_prompt_includes_current_streaming_capability() -> None:

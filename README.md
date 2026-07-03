@@ -185,6 +185,7 @@ QWEN_MODEL=qwen-plus
 
 ```text
 backend/app/prompts/decision/v1.0.txt
+backend/app/prompts/planner/v1.0.txt
 backend/app/prompts/followup_decision/v1.0.txt
 backend/app/prompts/final_reply/v1.0.txt
 ```
@@ -193,11 +194,52 @@ backend/app/prompts/final_reply/v1.0.txt
 
 ```env
 PROMPT_DECISION_VERSION=v1.0
+PROMPT_PLANNER_VERSION=v1.0
 PROMPT_FOLLOWUP_DECISION_VERSION=v1.0
 PROMPT_FINAL_REPLY_VERSION=v1.0
 ```
 
 如果配置了不存在的 Prompt 版本，后端会记录错误日志并停止本次大模型流程，避免静默回退到错误行为。
+
+## 纯模型 Planner
+
+前端聊天页提供“启用纯模型 Planner”勾选框，默认不勾选。不勾选时，聊天仍走原有单步决策流程；勾选后，请求体会增加：
+
+```json
+{
+  "use_planner": true
+}
+```
+
+启用后流程变为：安全检查 -> 大模型生成多步骤计划 JSON -> 后端校验动作白名单和参数 -> 按计划调用 MySQL、知识库、地图、头像等受控工具 -> 大模型生成最终回复。
+
+Planner 只负责生成计划，不能直接访问数据库、地图 MCP 或生成 SQL。计划 JSON 解析失败、动作非法、步骤为空或模型调用失败时，后端会写入日志和审计字段，并回退到原有单步决策流程。
+
+审计日志会额外记录：
+
+```text
+use_planner
+plan_actions
+completed_plan_steps
+planner_fallback_reason
+```
+
+## Agent 评测系统
+
+评测系统会真实调用当前 DeepSeek / 千问配置和已启用工具，默认关闭，避免误消耗模型额度。启用方式：
+
+```env
+AGENT_EVAL_ENABLED=true
+```
+
+启用后可通过前端“Agent 评测”视图手动运行，也可直接调用接口：
+
+```text
+GET  /api/evaluations/cases
+POST /api/evaluations/run
+```
+
+`POST /api/evaluations/run` 支持传入 `model_provider` 和 `use_planner`。依赖 MySQL 或高德地图的用例在对应配置未启用时会返回 `skipped`，不计为失败。
 
 ## 日志持久化
 

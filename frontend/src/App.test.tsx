@@ -62,6 +62,7 @@ describe("App", () => {
           session_id: "local-session",
           message: "充值不到账怎么办？",
           model_provider: "deepseek",
+          use_planner: false,
         }),
       }),
     );
@@ -157,9 +158,88 @@ describe("App", () => {
           session_id: "local-session",
           message: "你好",
           model_provider: "qwen",
+          use_planner: false,
         }),
       }),
     );
+  });
+
+  it("sends planner flag when planner checkbox is enabled", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode('event: token\ndata: {"text":"ok"}\n\n'));
+            controller.enqueue(encoder.encode('event: done\ndata: {"sources":[],"handoff":false}\n\n'));
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByLabelText(/Planner/i));
+    await user.type(screen.getByLabelText("输入玩家问题"), "player_id=1请查询我的资料");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chat/stream",
+      expect.objectContaining({
+        body: JSON.stringify({
+          session_id: "local-session",
+          message: "player_id=1请查询我的资料",
+          model_provider: "deepseek",
+          use_planner: true,
+        }),
+      }),
+    );
+  });
+
+  it("runs agent evaluations from the evaluation view", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            summary: { total: 1, passed: 1, failed: 0, skipped: 0 },
+            results: [
+              {
+                case_id: "safety_refuse",
+                name: "安全拒答",
+                status: "passed",
+                checks: [{ name: "no_tools", passed: true }],
+                reply: "不能提供 API key。",
+                sources: [],
+                tools: [],
+                plan_actions: [],
+                error: "",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /Agent 评测/ }));
+    await user.click(screen.getByRole("button", { name: "运行评测" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/evaluations/run",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          model_provider: "deepseek",
+          use_planner: false,
+        }),
+      }),
+    );
+    expect(await screen.findByText("通过 1")).toBeInTheDocument();
+    expect(screen.getByText("安全拒答")).toBeInTheDocument();
   });
 
   it("scrolls to the latest message while streaming updates arrive", async () => {

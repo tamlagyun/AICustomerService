@@ -20,8 +20,16 @@ def test_load_prompt_reads_default_decision_prompt() -> None:
     assert "mysql_players_list" in prompt
 
 
+def test_load_prompt_reads_default_planner_prompt() -> None:
+    prompt = load_prompt("planner", "v1.0")
+
+    assert "纯模型 Planner" in prompt
+    assert "steps" in prompt
+
+
 def test_get_prompt_versions_reads_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PROMPT_DECISION_VERSION", "v1.1")
+    monkeypatch.setenv("PROMPT_PLANNER_VERSION", "v1.4")
     monkeypatch.setenv("PROMPT_FOLLOWUP_DECISION_VERSION", "v1.2")
     monkeypatch.setenv("PROMPT_FINAL_REPLY_VERSION", "v1.3")
     get_settings.cache_clear()
@@ -30,6 +38,7 @@ def test_get_prompt_versions_reads_settings(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert versions == {
         "decision": "v1.1",
+        "planner": "v1.4",
         "followup_decision": "v1.2",
         "final_reply": "v1.3",
     }

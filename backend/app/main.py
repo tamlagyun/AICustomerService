@@ -8,6 +8,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.agent import run_customer_service_agent, stream_customer_service_agent
 from app.config import get_settings
+from app.evaluations import EvaluationRunRequest, ensure_evaluation_enabled, list_evaluation_cases
+from app.evaluations import run_evaluation_suite
 from app.logging_config import configure_logging
 from app.schemas import ChatRequest, ChatResponse
 
@@ -41,6 +43,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         player_id=request.player_id,
         message=request.message,
         model_provider=request.model_provider,
+        use_planner=request.use_planner,
     )
 
 
@@ -53,6 +56,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 player_id=request.player_id,
                 message=request.message,
                 model_provider=request.model_provider,
+                use_planner=request.use_planner,
             ):
                 yield _format_sse(event["event"], event["data"])
         except Exception:
@@ -63,6 +67,18 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/api/evaluations/cases")
+async def evaluation_cases() -> dict:
+    ensure_evaluation_enabled()
+    return list_evaluation_cases()
+
+
+@app.post("/api/evaluations/run")
+async def evaluation_run(request: EvaluationRunRequest) -> dict:
+    ensure_evaluation_enabled()
+    return await run_evaluation_suite(request)
 
 
 def _format_sse(event: str, data: dict) -> str:

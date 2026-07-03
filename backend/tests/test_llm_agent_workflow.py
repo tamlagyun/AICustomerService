@@ -47,6 +47,34 @@ class MultiStepFakeLLMClient:
         return LLMResponse(content=self.final_reply)
 
 
+class PlannerFakeLLMClient:
+    def __init__(
+        self,
+        *,
+        plan_reply: str,
+        final_reply: str,
+        fallback_decision: AgentDecision | None = None,
+    ) -> None:
+        self.plan_reply = plan_reply
+        self.final_reply = final_reply
+        self.fallback_decision = fallback_decision
+        self.decision_messages: list[list[dict[str, str]]] = []
+        self.generate_messages: list[list[dict[str, str]]] = []
+
+    async def decide_action(self, messages: list[dict[str, str]]) -> AgentDecision:
+        self.decision_messages.append(messages)
+        return self.fallback_decision or AgentDecision(
+            action=AgentAction.FALLBACK,
+            reason="Planner test should not use decide_action",
+        )
+
+    async def generate_reply(self, messages: list[dict[str, str]]) -> LLMResponse:
+        self.generate_messages.append(messages)
+        if len(self.generate_messages) == 1:
+            return LLMResponse(content=self.plan_reply)
+        return LLMResponse(content=self.final_reply)
+
+
 class FailingDecisionLLMClient:
     async def decide_action(self, messages: list[dict[str, str]]) -> AgentDecision:
         raise TimeoutError("llm timeout")
@@ -517,6 +545,118 @@ async def test_llm_agent_calls_players_then_map_for_guangzhou_recommendations(
     assert "进攻型玩家" in final_prompt
 
 
+async def test_planner_executes_player_then_map_steps_when_enabled(monkeypatch) -> None:
+    player_tools = FakePlayerDataTools()
+    map_tools = FakeGuangzhouAttractionMapTools()
+    monkeypatch.setattr(
+        "app.agent.customer_service.build_player_data_tools",
+        lambda: player_tools,
+    )
+    monkeypatch.setattr(
+        "app.agent.map_agent.build_map_tools",
+        lambda: map_tools,
+    )
+    llm_client = PlannerFakeLLMClient(
+        plan_reply=json.dumps(
+            {
+                "final_task": "combine players and attractions",
+                "steps": [
+                    {
+                        "action": "mysql_players_list",
+                        "reason": "need players",
+                        "arguments": {"limit": 100},
+                    },
+                    {
+                        "action": "amap_place_search",
+                        "reason": "need Guangzhou attractions",
+                        "arguments": {"keywords": "旅游景点", "city": "广州"},
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        final_reply="Planner 已完成玩家和广州景点联合推荐。",
+    )
+
+    response = await run_customer_service_agent(
+        session_id="planner-session",
+        message="查询玩家资料并根据desc推荐广州景点",
+        llm_client=llm_client,
+        use_planner=True,
+    )
+
+    assert player_tools.requested_limit == 100
+    assert map_tools.place_query == {"keywords": "旅游景点", "city": "广州", "types": None}
+    assert llm_client.decision_messages == []
+    assert len(llm_client.generate_messages) == 2
+    assert response.reply == "Planner 已完成玩家和广州景点联合推荐。"
+    assert response.sources[0].reference == "maps_text_search"
+
+
+async def test_planner_is_not_used_when_request_flag_is_false(monkeypatch) -> None:
+    player_tools = FakePlayerDataTools()
+    monkeypatch.setattr(
+        "app.agent.customer_service.build_player_data_tools",
+        lambda: player_tools,
+    )
+    llm_client = PlannerFakeLLMClient(
+        plan_reply=json.dumps(
+            {"steps": [{"action": "mysql_players_list", "reason": "would be planner"}]},
+            ensure_ascii=False,
+        ),
+        final_reply="不应该使用 Planner 最终回复",
+    )
+
+    response = await run_customer_service_agent(
+        session_id="planner-disabled-session",
+        message="查询数据库中所有的资料并且根据desc进行分类，用表格显示出来",
+        llm_client=llm_client,
+        use_planner=False,
+    )
+
+    assert len(llm_client.generate_messages) == 0
+    assert len(llm_client.decision_messages) == 1
+    assert player_tools.requested_limit == 100
+    assert response.tables[0].title == "玩家列表"
+
+
+@pytest.mark.parametrize(
+    "plan_reply",
+    [
+        "not json",
+        '{"steps":[{"action":"write_sql","reason":"bad"}]}',
+        '{"steps":[]}',
+    ],
+)
+async def test_planner_parse_error_falls_back_to_legacy_decision(monkeypatch, plan_reply: str) -> None:
+    player_tools = FakePlayerDataTools()
+    monkeypatch.setattr(
+        "app.agent.customer_service.build_player_data_tools",
+        lambda: player_tools,
+    )
+    llm_client = PlannerFakeLLMClient(
+        plan_reply=plan_reply,
+        final_reply="旧流程完成玩家列表查询。",
+        fallback_decision=AgentDecision(
+            action=AgentAction.MYSQL_PLAYERS_LIST,
+            reason="Planner 失败后继续使用旧流程",
+        ),
+    )
+
+    response = await run_customer_service_agent(
+        session_id="planner-invalid-json-session",
+        message="查询数据库中所有的资料并且根据desc进行分类，用表格显示出来",
+        llm_client=llm_client,
+        use_planner=True,
+    )
+
+    assert len(llm_client.generate_messages) == 2
+    assert len(llm_client.decision_messages) == 1
+    assert player_tools.requested_limit == 100
+    assert response.reply == "旧流程完成玩家列表查询。"
+    assert response.tables[0].title == "玩家列表"
+
+
 async def test_local_rules_route_database_all_profiles_to_players_list(monkeypatch) -> None:
     player_tools = FakePlayerDataTools()
     monkeypatch.setattr(
@@ -937,7 +1077,7 @@ async def test_llm_agent_logs_prompt_versions(caplog) -> None:
 
     assert (
         "Prompt versions selected; session_id=prompt-version-session "
-        "decision=v1.0 followup_decision=v1.0 final_reply=v1.0"
+        "decision=v1.0 planner=v1.0 followup_decision=v1.0 final_reply=v1.0"
     ) in caplog.text
 
 

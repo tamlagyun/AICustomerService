@@ -7,6 +7,7 @@ class ChatRequest(BaseModel):
     session_id: str = Field(min_length=1)
     player_id: str | None = None
     model_provider: str | None = Field(default=None, max_length=32)
+    use_planner: bool = False
     message: str = Field(min_length=1, max_length=4000)
 
 

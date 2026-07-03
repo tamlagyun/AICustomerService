@@ -8,6 +8,7 @@ from langgraph.graph import END, StateGraph
 
 from app.agent.decision import AgentAction, AgentDecision
 from app.agent.map_agent import run_map_agent
+from app.agent.planner import AgentPlan, PlanParseError, parse_agent_plan
 from app.agent_audit import write_agent_audit_event
 from app.avatar_generation import AvatarGenerationResult, build_avatar_generator
 from app.config import Settings, get_settings
@@ -51,6 +52,11 @@ class CustomerServiceState(TypedDict, total=False):
     llm_client: LLMClientProtocol | None
     llm_decision: AgentDecision
     map_decision: AgentDecision
+    use_planner: bool
+    agent_plan: AgentPlan
+    plan_step_index: int
+    completed_plan_steps: list[dict[str, object]]
+    planner_fallback_reason: str
     use_llm_final_reply: bool
     knowledge_results: list[KnowledgeChunk]
     player_data_result: PlayerDataResult
@@ -68,6 +74,7 @@ class CustomerServiceState(TypedDict, total=False):
 def build_customer_service_graph():
     workflow = StateGraph(CustomerServiceState)
     workflow.add_node("analyze_safety", analyze_safety_node)
+    workflow.add_node("plan_with_llm", plan_with_llm)
     workflow.add_node("decide_action_with_llm", decide_action_with_llm)
     workflow.add_node("classify_question", classify_question)
     workflow.add_node("retrieve_knowledge", retrieve_knowledge)
@@ -95,7 +102,23 @@ def build_customer_service_graph():
         {
             "refuse": "generate_refusal_reply",
             "handoff": "generate_handoff_reply",
-            "allow": "decide_action_with_llm",
+            "allow": "plan_with_llm",
+        },
+    )
+    workflow.add_conditional_edges(
+        "plan_with_llm",
+        route_after_planning,
+        {
+            "legacy": "decide_action_with_llm",
+            "fallback": "decide_action_with_llm",
+            "handoff": "generate_handoff_reply",
+            "direct_answer": "generate_direct_reply",
+            "ask_clarification": "generate_direct_reply",
+            "knowledge": "retrieve_knowledge",
+            "player_data": "retrieve_player_data",
+            "players_list": "retrieve_players_list",
+            "avatar": "retrieve_player_data",
+            "map": "retrieve_map_data",
         },
     )
     workflow.add_conditional_edges(
@@ -193,6 +216,7 @@ async def run_customer_service_agent(
     message: str,
     player_id: str | None = None,
     model_provider: str | None = None,
+    use_planner: bool = False,
     llm_client: LLMClientProtocol | None = None,
     status_queue: asyncio.Queue[str] | None = None,
 ) -> ChatResponse:
@@ -220,6 +244,7 @@ async def run_customer_service_agent(
             "session_id": session_id,
             "player_id": player_id,
             "message": message,
+            "use_planner": use_planner,
             "conversation_history": memory.get_recent_messages(session_id),
             "llm_client": selected_llm_client,
             "status_queue": status_queue,
@@ -264,6 +289,7 @@ async def stream_customer_service_agent(
     message: str,
     player_id: str | None = None,
     model_provider: str | None = None,
+    use_planner: bool = False,
     llm_client: LLMClientProtocol | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     yield {"event": "status", "data": {"message": "正在分析问题"}}
@@ -281,6 +307,7 @@ async def stream_customer_service_agent(
             player_id=player_id,
             message=message,
             model_provider=model_provider,
+            use_planner=use_planner,
             llm_client=streaming_llm_client,
             status_queue=status_queue,
         )
@@ -332,6 +359,64 @@ def route_safety(state: CustomerServiceState) -> Literal["allow", "handoff", "re
     if action == SafetyAction.HANDOFF:
         return "handoff"
     return "allow"
+
+
+async def plan_with_llm(state: CustomerServiceState) -> CustomerServiceState:
+    if not state.get("use_planner"):
+        return state
+
+    llm_client = state.get("llm_client")
+    if llm_client is None:
+        return {**state, "planner_fallback_reason": "llm_unavailable"}
+
+    try:
+        _emit_status(state, "正在请求纯模型 Planner 生成执行计划")
+        response = await llm_client.generate_reply(
+            _planner_messages(
+                state["normalized_message"],
+                state.get("conversation_history", []),
+            )
+        )
+        plan = parse_agent_plan(response.content)
+    except PromptNotFoundError:
+        logger.exception("Prompt loading failed during Planner; session_id=%s", state.get("session_id"))
+        raise
+    except PlanParseError as exc:
+        logger.exception("Planner failed; session_id=%s", state.get("session_id"))
+        _emit_status(state, f"Planner 生成计划失败，正在回退旧决策流程：{type(exc).__name__}")
+        return {**state, "planner_fallback_reason": type(exc).__name__}
+    except Exception as exc:
+        logger.exception("Planner failed; session_id=%s", state.get("session_id"))
+        _emit_status(state, f"Planner 生成计划失败，正在回退旧决策流程：{type(exc).__name__}")
+        return {**state, "planner_fallback_reason": type(exc).__name__}
+
+    first_decision = plan.steps[0].to_decision(fallback_final_task=plan.final_task)
+    return {
+        **state,
+        "agent_plan": plan,
+        "plan_step_index": 0,
+        "completed_plan_steps": [],
+        "llm_decision": first_decision,
+    }
+
+
+def route_after_planning(
+    state: CustomerServiceState,
+) -> Literal[
+    "legacy",
+    "fallback",
+    "handoff",
+    "direct_answer",
+    "ask_clarification",
+    "knowledge",
+    "player_data",
+    "players_list",
+    "avatar",
+    "map",
+]:
+    if not state.get("use_planner") or state.get("agent_plan") is None:
+        return "legacy"
+    return route_llm_decision(state)
 
 
 async def decide_action_with_llm(state: CustomerServiceState) -> CustomerServiceState:
@@ -464,34 +549,44 @@ def retrieve_knowledge(state: CustomerServiceState) -> CustomerServiceState:
         state["normalized_message"],
         limit=1,
     )
-    return {
+    next_state = {
         **state,
         "knowledge_results": results,
         "use_llm_final_reply": _should_use_llm_final_reply(state),
     }
+    return _complete_current_plan_step(next_state)
 
 
 def retrieve_player_data(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在查询 MySQL 玩家数据")
     result = build_player_data_tools().get_player_profile(_player_id_for_tool_call(state))
-    return {
+    next_state = {
         **state,
         "player_data_result": result,
         "use_llm_final_reply": _should_use_llm_final_reply(state),
     }
+    current_plan_decision = _current_plan_decision(state)
+    if current_plan_decision is not None and current_plan_decision.action == AgentAction.AVATAR_GENERATE:
+        return next_state
+    return _complete_current_plan_step(next_state)
 
 
 def retrieve_players_list(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在查询 MySQL 玩家列表")
     result = build_player_data_tools().get_players(_players_limit_for_tool_call(state))
-    return {
+    next_state = {
         **state,
         "player_data_result": result,
         "use_llm_final_reply": _should_use_llm_final_reply(state),
     }
+    return _complete_current_plan_step(next_state)
 
 
 async def decide_followup_after_player_data(state: CustomerServiceState) -> CustomerServiceState:
+    planned_decision = _current_plan_decision(state)
+    if planned_decision is not None and _is_map_decision(planned_decision):
+        return {**state, "map_decision": planned_decision}
+
     if not _needs_attraction_recommendation(state):
         return state
 
@@ -534,12 +629,13 @@ async def retrieve_map_data(state: CustomerServiceState) -> CustomerServiceState
         emit_status=lambda text: _emit_status(state, text),
     )
 
-    return {
+    next_state = {
         **state,
         "map_decision": map_agent_result.decision,
         "map_result": map_agent_result.map_result,
         "use_llm_final_reply": _should_use_llm_final_reply(state),
     }
+    return _complete_current_plan_step(next_state)
 
 
 def generate_refusal_reply(state: CustomerServiceState) -> CustomerServiceState:
@@ -658,13 +754,15 @@ def generate_avatar(state: CustomerServiceState) -> CustomerServiceState:
             if player_data_result is not None
             else "需要先查询到玩家资料，才能生成个性头像。"
         )
-        return {
-            **state,
-            "reply": reply,
-            "sources": [],
-            "images": [],
-            "handoff": False,
-        }
+        return _complete_current_plan_step(
+            {
+                **state,
+                "reply": reply,
+                "sources": [],
+                "images": [],
+                "handoff": False,
+            }
+        )
 
     avatar_result = build_avatar_generator().generate_player_avatar(
         player_data_result.data,
@@ -675,14 +773,16 @@ def generate_avatar(state: CustomerServiceState) -> CustomerServiceState:
         if avatar_result.url and avatar_result.alt
         else []
     )
-    return {
-        **state,
-        "avatar_result": avatar_result,
-        "reply": avatar_result.summary,
-        "sources": [],
-        "images": images,
-        "handoff": False,
-    }
+    return _complete_current_plan_step(
+        {
+            **state,
+            "avatar_result": avatar_result,
+            "reply": avatar_result.summary,
+            "sources": [],
+            "images": images,
+            "handoff": False,
+        }
+    )
 
 
 def generate_avatar_reply(state: CustomerServiceState) -> CustomerServiceState:
@@ -786,8 +886,16 @@ def _write_chat_audit_event(
                 "message": message,
                 "reply": response.reply,
                 "handoff": response.handoff,
+                "use_planner": bool(final_state.get("use_planner")) if final_state else False,
                 "llm_action": _audit_action(final_state.get("llm_decision") if final_state else None),
                 "map_action": _audit_action(final_state.get("map_decision") if final_state else None),
+                "plan_actions": _audit_plan_actions(final_state),
+                "completed_plan_steps": final_state.get("completed_plan_steps", [])
+                if final_state
+                else [],
+                "planner_fallback_reason": final_state.get("planner_fallback_reason")
+                if final_state
+                else None,
                 "sources": [source.model_dump() for source in response.sources],
                 "images": [image.model_dump() for image in response.images],
                 "tables": [
@@ -809,6 +917,15 @@ def _audit_action(decision: AgentDecision | None) -> str | None:
     if decision is None:
         return None
     return str(decision.action)
+
+
+def _audit_plan_actions(state: CustomerServiceState | None) -> list[str]:
+    if state is None:
+        return []
+    plan = state.get("agent_plan")
+    if plan is None:
+        return []
+    return plan.actions()
 
 
 def _audit_tools(state: CustomerServiceState | None) -> list[dict[str, object]]:
@@ -880,12 +997,34 @@ def _compiled_graph():
 def _log_prompt_versions(session_id: str, settings: Settings) -> None:
     versions = get_prompt_versions(settings)
     logger.info(
-        "Prompt versions selected; session_id=%s decision=%s followup_decision=%s final_reply=%s",
+        "Prompt versions selected; session_id=%s decision=%s planner=%s followup_decision=%s final_reply=%s",
         session_id,
         versions["decision"],
+        versions["planner"],
         versions["followup_decision"],
         versions["final_reply"],
     )
+
+
+def _planner_messages(
+    message: str,
+    conversation_history: list[ConversationMessage],
+) -> list[dict[str, str]]:
+    versions = get_prompt_versions(get_settings())
+    return [
+        {
+            "role": "system",
+            "content": load_prompt("planner", versions["planner"]),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"历史对话（最近 10 条）：\n{_format_conversation_history(conversation_history)}\n"
+                f"当前玩家问题：{message}\n"
+                "请输出执行计划 JSON。"
+            ),
+        },
+    ]
 
 
 def _decision_messages(
@@ -1128,6 +1267,42 @@ def _tool_name_for_prompt(state: CustomerServiceState) -> str:
 
 def _map_decision_for_tool_call(state: CustomerServiceState) -> AgentDecision | None:
     return state.get("map_decision") or state.get("llm_decision")
+
+
+def _current_plan_decision(state: CustomerServiceState) -> AgentDecision | None:
+    plan = state.get("agent_plan")
+    if plan is None:
+        return None
+    index = state.get("plan_step_index", 0)
+    if index < 0 or index >= len(plan.steps):
+        return None
+    return plan.steps[index].to_decision(fallback_final_task=plan.final_task)
+
+
+def _complete_current_plan_step(state: CustomerServiceState) -> CustomerServiceState:
+    plan = state.get("agent_plan")
+    if plan is None:
+        return state
+
+    index = state.get("plan_step_index", 0)
+    if index < 0 or index >= len(plan.steps):
+        return state
+
+    step = plan.steps[index]
+    completed_steps = [
+        *state.get("completed_plan_steps", []),
+        {
+            "index": index,
+            "action": str(step.action),
+            "reason": step.reason,
+            "status": "completed",
+        },
+    ]
+    return {
+        **state,
+        "plan_step_index": index + 1,
+        "completed_plan_steps": completed_steps,
+    }
 
 
 def _map_tool_name(map_result: MapToolResult) -> str | None:

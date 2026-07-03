@@ -35,6 +35,7 @@ export const DEFAULT_MODEL_PROVIDER: ModelProvider = "deepseek";
 export async function sendChatMessage(
   message: string,
   modelProvider: ModelProvider = DEFAULT_MODEL_PROVIDER,
+  usePlanner = false,
 ): Promise<ChatResponse> {
   const response = await fetch("/api/chat", {
     method: "POST",
@@ -43,6 +44,7 @@ export async function sendChatMessage(
       session_id: "local-session",
       message,
       model_provider: modelProvider,
+      use_planner: usePlanner,
     }),
   });
 
@@ -62,6 +64,7 @@ export type ChatStreamHandlers = {
 export async function sendChatMessageStream(
   message: string,
   modelProvider: ModelProvider,
+  usePlanner: boolean,
   handlers: ChatStreamHandlers,
 ): Promise<void> {
   const response = await fetch("/api/chat/stream", {
@@ -71,6 +74,7 @@ export async function sendChatMessageStream(
       session_id: "local-session",
       message,
       model_provider: modelProvider,
+      use_planner: usePlanner,
     }),
   });
 
@@ -129,4 +133,65 @@ function handleSseEvent(rawEvent: string, handlers: ChatStreamHandlers): void {
   if (event === "error") {
     throw new Error(typeof data.message === "string" ? data.message : "Chat stream failed");
   }
+}
+
+export type EvaluationStatus = "passed" | "failed" | "skipped";
+
+export type EvaluationSummary = {
+  total: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+};
+
+export type EvaluationCheck = {
+  name: string;
+  passed: boolean;
+  expected?: unknown;
+  actual?: unknown;
+  detail?: string;
+};
+
+export type EvaluationResult = {
+  case_id: string;
+  name: string;
+  status: EvaluationStatus;
+  checks: EvaluationCheck[];
+  reply: string;
+  sources: ChatSource[];
+  tables: ChatTable[];
+  tools: string[];
+  plan_actions: string[];
+  error: string;
+};
+
+export type EvaluationRunResponse = {
+  summary: EvaluationSummary;
+  results: EvaluationResult[];
+};
+
+export async function runAgentEvaluations(
+  modelProvider: ModelProvider,
+  usePlanner: boolean,
+  caseIds?: string[],
+): Promise<EvaluationRunResponse> {
+  const body: { model_provider: ModelProvider; use_planner: boolean; case_ids?: string[] } = {
+    model_provider: modelProvider,
+    use_planner: usePlanner,
+  };
+  if (caseIds?.length) {
+    body.case_ids = caseIds;
+  }
+
+  const response = await fetch("/api/evaluations/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw new Error("Agent evaluation request failed");
+  }
+
+  return response.json() as Promise<EvaluationRunResponse>;
 }

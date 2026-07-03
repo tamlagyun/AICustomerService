@@ -8,12 +8,13 @@ class PromptNotFoundError(RuntimeError):
 
 
 PROMPT_ROOT = Path(__file__).resolve().parent / "prompts"
-SUPPORTED_PROMPT_TYPES = {"decision", "followup_decision", "final_reply"}
+SUPPORTED_PROMPT_TYPES = {"decision", "planner", "followup_decision", "final_reply"}
 
 
 def get_prompt_versions(settings: Settings) -> dict[str, str]:
     return {
         "decision": settings.prompt_decision_version,
+        "planner": settings.prompt_planner_version,
         "followup_decision": settings.prompt_followup_decision_version,
         "final_reply": settings.prompt_final_reply_version,
     }

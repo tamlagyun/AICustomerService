@@ -7,6 +7,26 @@ export type DevServerConfig = {
   backendProxy: Record<string, string>;
 };
 
+export function mergeDevServerEnv(
+  processEnv: EnvLike,
+  projectEnv: EnvLike,
+): EnvLike {
+  const merged: EnvLike = {};
+  for (const key in processEnv) {
+    const value = processEnv[key];
+    if (value !== undefined) {
+      merged[key] = value;
+    }
+  }
+  for (const key in projectEnv) {
+    const value = projectEnv[key];
+    if (value !== undefined) {
+      merged[key] = value;
+    }
+  }
+  return merged;
+}
+
 export function resolveDevServerConfig(env: EnvLike): DevServerConfig {
   const backendOrigin = env.BACKEND_ORIGIN || "http://127.0.0.1:8000";
 

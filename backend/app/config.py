@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     amap_mcp_timeout_seconds: float = 15
     knowledge_base_dir: str = "../knowledge_base"
     vector_store_dir: str = "./data/vector_store"
+    prompt_decision_version: str = "v1.0"
+    prompt_followup_decision_version: str = "v1.0"
+    prompt_final_reply_version: str = "v1.0"
 
     model_config = SettingsConfigDict(env_file="../.env", env_file_encoding="utf-8", extra="ignore")
 

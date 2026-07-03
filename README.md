@@ -179,6 +179,26 @@ QWEN_MODEL=qwen-plus
 
 旧的 `LLM_PROVIDER`、`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 仍作为 DeepSeek 兼容配置保留，建议新配置使用 `DEEPSEEK_*` 和 `QWEN_*`。
 
+## Prompt 版本管理
+
+后端已把大模型使用的 system prompt 拆成版本文件管理：
+
+```text
+backend/app/prompts/decision/v1.0.txt
+backend/app/prompts/followup_decision/v1.0.txt
+backend/app/prompts/final_reply/v1.0.txt
+```
+
+通过 `.env` 切换当前版本：
+
+```env
+PROMPT_DECISION_VERSION=v1.0
+PROMPT_FOLLOWUP_DECISION_VERSION=v1.0
+PROMPT_FINAL_REPLY_VERSION=v1.0
+```
+
+如果配置了不存在的 Prompt 版本，后端会记录错误日志并停止本次大模型流程，避免静默回退到错误行为。
+
 启用后流程：
 
 ```text

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveDevServerConfig } from "./devServerConfig";
+import { mergeDevServerEnv, resolveDevServerConfig } from "./devServerConfig";
 
 describe("resolveDevServerConfig", () => {
   it("uses localhost defaults", () => {
@@ -29,5 +29,37 @@ describe("resolveDevServerConfig", () => {
       "/api": "http://192.168.8.151:8000",
       "/generated": "http://192.168.8.151:8000",
     });
+  });
+
+  it("uses project env values when process env is missing", () => {
+    const config = resolveDevServerConfig(
+      mergeDevServerEnv(
+        {},
+        {
+          BACKEND_ORIGIN: "http://127.0.0.1:8001",
+        },
+      ),
+    );
+
+    expect(config.backendOrigin).toBe("http://127.0.0.1:8001");
+    expect(config.backendProxy).toEqual({
+      "/api": "http://127.0.0.1:8001",
+      "/generated": "http://127.0.0.1:8001",
+    });
+  });
+
+  it("lets project env override stale process env values", () => {
+    const config = resolveDevServerConfig(
+      mergeDevServerEnv(
+        {
+          BACKEND_ORIGIN: "http://127.0.0.1:9000",
+        },
+        {
+          BACKEND_ORIGIN: "http://127.0.0.1:8001",
+        },
+      ),
+    );
+
+    expect(config.backendOrigin).toBe("http://127.0.0.1:8001");
   });
 });

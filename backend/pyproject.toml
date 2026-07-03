@@ -11,6 +11,7 @@ dependencies = [
     "langchain>=0.3.0",
     "langgraph>=0.2.0",
     "pymysql>=1.1.1",
+    "chromadb>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +25,10 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["data*"]
 
 [tool.ruff]
 line-length = 100

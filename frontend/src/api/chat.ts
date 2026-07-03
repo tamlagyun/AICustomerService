@@ -29,13 +29,16 @@ export type ChatResponse = {
 };
 
 export type ModelProvider = "deepseek" | "qwen";
+export type KnowledgeSource = "doc" | "vector";
 
 export const DEFAULT_MODEL_PROVIDER: ModelProvider = "deepseek";
+export const DEFAULT_KNOWLEDGE_SOURCE: KnowledgeSource = "doc";
 
 export async function sendChatMessage(
   message: string,
   modelProvider: ModelProvider = DEFAULT_MODEL_PROVIDER,
   usePlanner = false,
+  knowledgeSource: KnowledgeSource = DEFAULT_KNOWLEDGE_SOURCE,
 ): Promise<ChatResponse> {
   const response = await fetch("/api/chat", {
     method: "POST",
@@ -45,6 +48,7 @@ export async function sendChatMessage(
       message,
       model_provider: modelProvider,
       use_planner: usePlanner,
+      knowledge_source: knowledgeSource,
     }),
   });
 
@@ -65,6 +69,7 @@ export async function sendChatMessageStream(
   message: string,
   modelProvider: ModelProvider,
   usePlanner: boolean,
+  knowledgeSource: KnowledgeSource,
   handlers: ChatStreamHandlers,
 ): Promise<void> {
   const response = await fetch("/api/chat/stream", {
@@ -75,6 +80,7 @@ export async function sendChatMessageStream(
       message,
       model_provider: modelProvider,
       use_planner: usePlanner,
+      knowledge_source: knowledgeSource,
     }),
   });
 
@@ -152,6 +158,15 @@ export type EvaluationCheck = {
   detail?: string;
 };
 
+export type EvaluationTool =
+  | string
+  | {
+      tool?: string;
+      status?: string;
+      summary?: string;
+      [key: string]: unknown;
+    };
+
 export type EvaluationResult = {
   case_id: string;
   name: string;
@@ -160,7 +175,7 @@ export type EvaluationResult = {
   reply: string;
   sources: ChatSource[];
   tables: ChatTable[];
-  tools: string[];
+  tools: EvaluationTool[];
   plan_actions: string[];
   error: string;
 };
@@ -168,6 +183,14 @@ export type EvaluationResult = {
 export type EvaluationRunResponse = {
   summary: EvaluationSummary;
   results: EvaluationResult[];
+};
+
+export type KnowledgeVectorRebuildResponse = {
+  status: "rebuilt" | "failed" | string;
+  chunk_count: number;
+  collection_name: string;
+  embedding_model: string;
+  message: string;
 };
 
 export async function runAgentEvaluations(
@@ -194,4 +217,17 @@ export async function runAgentEvaluations(
   }
 
   return response.json() as Promise<EvaluationRunResponse>;
+}
+
+export async function rebuildKnowledgeVectorIndex(): Promise<KnowledgeVectorRebuildResponse> {
+  const response = await fetch("/api/knowledge-base/vector-index/rebuild", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!response.ok) {
+    throw new Error("Knowledge vector rebuild request failed");
+  }
+
+  return response.json() as Promise<KnowledgeVectorRebuildResponse>;
 }

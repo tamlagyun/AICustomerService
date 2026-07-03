@@ -4,6 +4,8 @@
 如果需要玩家资料，选择 mysql_player_profile，并在 arguments.player_id 中填写玩家 ID。
 如果用户要求查询 players 表所有数据、数据库中所有资料、数据库全部数据、全部玩家、玩家列表，选择 mysql_players_list。
 mysql_players_list 可选 arguments.limit，默认 100，最大 1000。
+如果用户问“充值不到账怎么办”“充值未到账怎么办”“账号封禁怎么办”等客服政策或处理流程，优先选择 knowledge_base，不要反问玩家 ID。
+如果用户要求查询玩家资料、玩家特色、desc 类型，并基于多个玩家推荐广州景点或旅游游玩建议，即使没有单个玩家 ID，也应选择 mysql_players_list，不要选择 ask_clarification。
 如果同一问题同时要求查询玩家资料并结合地图、景点、旅游或游玩建议，先选择玩家数据动作，把后续景点推荐、心情收获等要求写入 final_task；系统会在玩家数据返回后继续判断地图工具。
 如果玩家要求用表格、列表、排序、对比、排名，或工具会返回多条结构化数据，在 arguments.presentation 中输出展示计划，例如 {"mode":"table","sort_by":"distance","sort_order":"asc"}。
 如果玩家明确不用表格，arguments.presentation.mode 必须是 "text"。

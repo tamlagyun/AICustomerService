@@ -4,9 +4,12 @@ import {
   ChatImage,
   ChatSource,
   ChatTable,
+  DEFAULT_KNOWLEDGE_SOURCE,
   DEFAULT_MODEL_PROVIDER,
   EvaluationRunResponse,
+  KnowledgeSource,
   ModelProvider,
+  rebuildKnowledgeVectorIndex,
   runAgentEvaluations,
   sendChatMessageStream,
 } from "./api/chat";
@@ -35,6 +38,7 @@ export function App() {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
   const [modelProvider, setModelProvider] = useState<ModelProvider>(DEFAULT_MODEL_PROVIDER);
+  const [knowledgeSource, setKnowledgeSource] = useState<KnowledgeSource>(DEFAULT_KNOWLEDGE_SOURCE);
   const [usePlanner, setUsePlanner] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,7 +77,7 @@ export function App() {
     ]);
 
     try {
-      await sendChatMessageStream(text, modelProvider, usePlanner, {
+      await sendChatMessageStream(text, modelProvider, usePlanner, knowledgeSource, {
         onToken(token) {
           setMessages((current) => updateLastAgentMessage(current, (message) => ({
             ...message,
@@ -161,6 +165,18 @@ export function App() {
                 <option value="qwen">千问</option>
               </select>
             </label>
+            <label className="model-select">
+              <span>知识来源</span>
+              <select
+                aria-label="选择知识来源"
+                value={knowledgeSource}
+                disabled={isSending || isEvaluating}
+                onChange={(event) => setKnowledgeSource(event.target.value as KnowledgeSource)}
+              >
+                <option value="doc">doc文档</option>
+                <option value="vector">向量库</option>
+              </select>
+            </label>
             <label className="planner-toggle">
               <input
                 type="checkbox"
@@ -246,6 +262,32 @@ function EvaluationView({
   error: string | null;
   onRun: () => void;
 }) {
+  const [isRebuilding, setIsRebuilding] = useState(false);
+  const [rebuildMessage, setRebuildMessage] = useState<string | null>(null);
+  const [rebuildError, setRebuildError] = useState<string | null>(null);
+
+  async function handleRebuildVectorIndex() {
+    if (isRebuilding) {
+      return;
+    }
+
+    setRebuildMessage(null);
+    setRebuildError(null);
+    setIsRebuilding(true);
+    try {
+      const response = await rebuildKnowledgeVectorIndex();
+      if (response.status === "failed") {
+        setRebuildError(response.message);
+      } else {
+        setRebuildMessage(response.message);
+      }
+    } catch {
+      setRebuildError("重建知识库向量库失败，请确认后端和 Ollama embedding 服务已启动。");
+    } finally {
+      setIsRebuilding(false);
+    }
+  }
+
   return (
     <section className="evaluation-view" aria-label="Agent 评测">
       <div className="evaluation-toolbar">
@@ -253,11 +295,18 @@ function EvaluationView({
           <h2>Agent 评测</h2>
           <p>调用当前模型和已启用工具运行内置用例，评测接口默认关闭。</p>
         </div>
-        <button type="button" onClick={onRun} disabled={isEvaluating}>
-          {isEvaluating ? "评测中" : "运行评测"}
-        </button>
+        <div className="evaluation-actions">
+          <button type="button" onClick={handleRebuildVectorIndex} disabled={isRebuilding}>
+            {isRebuilding ? "重建中" : "重建知识库向量库"}
+          </button>
+          <button type="button" onClick={onRun} disabled={isEvaluating}>
+            {isEvaluating ? "评测中" : "运行评测"}
+          </button>
+        </div>
       </div>
 
+      {rebuildMessage ? <p className="evaluation-info">{rebuildMessage}</p> : null}
+      {rebuildError ? <p className="error-message evaluation-error">{rebuildError}</p> : null}
       {error ? <p className="error-message evaluation-error">{error}</p> : null}
 
       {result ? (
@@ -281,7 +330,7 @@ function EvaluationView({
                 <dl>
                   <div>
                     <dt>工具</dt>
-                    <dd>{caseResult.tools.length ? caseResult.tools.join(", ") : "无"}</dd>
+                    <dd>{formatEvaluationTools(caseResult.tools)}</dd>
                   </div>
                   <div>
                     <dt>计划动作</dt>
@@ -356,6 +405,26 @@ function formatEvaluationStatus(status: string): string {
     return "失败";
   }
   return "跳过";
+}
+
+function formatEvaluationTools(tools: unknown[]): string {
+  if (!tools.length) {
+    return "无";
+  }
+  return tools.map(formatEvaluationTool).join(", ");
+}
+
+function formatEvaluationTool(tool: unknown): string {
+  if (typeof tool === "string") {
+    return tool;
+  }
+  if (tool && typeof tool === "object") {
+    const toolRecord = tool as Record<string, unknown>;
+    const name = typeof toolRecord.tool === "string" ? toolRecord.tool : "unknown_tool";
+    const status = typeof toolRecord.status === "string" ? toolRecord.status : "";
+    return status ? `${name}(${status})` : name;
+  }
+  return String(tool);
 }
 
 function updateLastAgentMessage(

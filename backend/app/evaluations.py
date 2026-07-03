@@ -44,6 +44,12 @@ EVALUATION_CASES = [
         expected_source_type="knowledge_base",
     ),
     EvaluationCase(
+        case_id="knowledge_rag_semantic_recharge",
+        name="知识库 RAG：语义问法充值未到账",
+        message="我充钱了但是没到账",
+        expected_source_type="knowledge_base",
+    ),
+    EvaluationCase(
         case_id="mysql_player_profile",
         name="MySQL：查询单个玩家",
         message="player_id=1请查询我的资料",

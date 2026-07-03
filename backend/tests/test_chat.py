@@ -1,6 +1,59 @@
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.schemas import ChatResponse
+
+
+def test_chat_passes_knowledge_source_to_agent(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run_customer_service_agent(**kwargs) -> ChatResponse:
+        captured.update(kwargs)
+        return ChatResponse(reply="ok")
+
+    monkeypatch.setattr("app.main.run_customer_service_agent", fake_run_customer_service_agent)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/chat",
+        json={
+            "session_id": "session-1",
+            "player_id": "player-1",
+            "message": "充值不到账怎么办",
+            "knowledge_source": "vector",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["knowledge_source"] == "vector"
+
+
+def test_knowledge_vector_rebuild_endpoint_returns_summary(monkeypatch) -> None:
+    def fake_rebuild_knowledge_vector_index() -> dict:
+        return {
+            "status": "rebuilt",
+            "chunk_count": 2,
+            "collection_name": "customer_service_knowledge",
+            "embedding_model": "bge-m3",
+            "message": "已重建 2 个知识片段。",
+        }
+
+    monkeypatch.setattr(
+        "app.main.rebuild_knowledge_vector_index",
+        fake_rebuild_knowledge_vector_index,
+    )
+    client = TestClient(app)
+
+    response = client.post("/api/knowledge-base/vector-index/rebuild")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "rebuilt",
+        "chunk_count": 2,
+        "collection_name": "customer_service_knowledge",
+        "embedding_model": "bge-m3",
+        "message": "已重建 2 个知识片段。",
+    }
 
 
 def test_chat_returns_basic_agent_reply() -> None:

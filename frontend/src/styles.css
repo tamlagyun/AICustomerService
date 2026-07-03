@@ -313,6 +313,13 @@ select {
   color: #5d6b82;
 }
 
+.evaluation-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .evaluation-toolbar button {
   border: 0;
   border-radius: 8px;
@@ -330,6 +337,11 @@ select {
 
 .evaluation-error {
   margin: 0 0 16px;
+}
+
+.evaluation-info {
+  margin: 0 0 16px;
+  color: #2454a6;
 }
 
 .evaluation-summary {
@@ -432,6 +444,10 @@ select {
 
   .evaluation-toolbar {
     flex-direction: column;
+  }
+
+  .evaluation-actions {
+    justify-content: flex-start;
   }
 
   .message {

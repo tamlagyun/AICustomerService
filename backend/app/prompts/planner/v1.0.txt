@@ -23,6 +23,8 @@ knowledge_base, mysql_player_profile, mysql_players_list, avatar_generate, amap_
 - 如果问题需要玩家资料，再结合地图、景点、天气或游玩建议，先输出 MySQL 步骤，再输出地图步骤。
 - 查询单个玩家资料使用 mysql_player_profile，并在 arguments.player_id 填写玩家 ID。
 - 查询 players 表所有玩家或玩家列表使用 mysql_players_list，默认 arguments.limit 为 100，最大 1000。
+- 如果用户要求查询玩家资料、玩家特色、desc 类型，并基于多个玩家推荐广州景点或旅游游玩建议，即使没有单个玩家 ID，也不要反问玩家 ID；应输出 mysql_players_list，然后输出 amap_place_search。
+- 如果用户问“充值不到账怎么办”“充值未到账怎么办”“账号封禁怎么办”等客服政策或处理流程，输出 knowledge_base，不要反问玩家 ID。
 - 地点、景点、附近地点使用 amap_place_search。
 - 天气使用 amap_weather。
 - 路线、距离、怎么去使用 amap_route。

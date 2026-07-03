@@ -31,7 +31,17 @@ class Settings(BaseSettings):
     amap_mcp_url: str = ""
     amap_mcp_timeout_seconds: float = 15
     knowledge_base_dir: str = "../knowledge_base"
+    knowledge_source_default: str = "doc"
+    knowledge_retrieval_mode: str = "hybrid"
+    knowledge_vector_min_score: float = 0.05
     vector_store_dir: str = "./data/vector_store"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_embedding_model: str = "bge-m3"
+    ollama_embedding_timeout_seconds: float = 30
+    chroma_persist_dir: str = "./data/chroma"
+    chroma_collection_name: str = "customer_service_knowledge"
+    chroma_top_k: int = 3
+    chroma_min_score: float = 0.2
     prompt_decision_version: str = "v1.0"
     prompt_planner_version: str = "v1.0"
     prompt_followup_decision_version: str = "v1.0"

@@ -63,6 +63,7 @@ describe("App", () => {
           message: "充值不到账怎么办？",
           model_provider: "deepseek",
           use_planner: false,
+          knowledge_source: "doc",
         }),
       }),
     );
@@ -159,6 +160,42 @@ describe("App", () => {
           message: "你好",
           model_provider: "qwen",
           use_planner: false,
+          knowledge_source: "doc",
+        }),
+      }),
+    );
+  });
+
+  it("sends the selected vector knowledge source to the chat stream API", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode('event: token\ndata: {"text":"ok"}\n\n'));
+            controller.enqueue(encoder.encode('event: done\ndata: {"sources":[],"handoff":false}\n\n'));
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.selectOptions(screen.getByLabelText("选择知识来源"), "vector");
+    await user.type(screen.getByLabelText("输入玩家问题"), "我充钱了但是没到账");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chat/stream",
+      expect.objectContaining({
+        body: JSON.stringify({
+          session_id: "local-session",
+          message: "我充钱了但是没到账",
+          model_provider: "deepseek",
+          use_planner: false,
+          knowledge_source: "vector",
         }),
       }),
     );
@@ -193,6 +230,7 @@ describe("App", () => {
           message: "player_id=1请查询我的资料",
           model_provider: "deepseek",
           use_planner: true,
+          knowledge_source: "doc",
         }),
       }),
     );
@@ -213,7 +251,7 @@ describe("App", () => {
                 checks: [{ name: "no_tools", passed: true }],
                 reply: "不能提供 API key。",
                 sources: [],
-                tools: [],
+                tools: [{ tool: "mysql_players_list", status: "found" }],
                 plan_actions: [],
                 error: "",
               },
@@ -240,6 +278,35 @@ describe("App", () => {
     );
     expect(await screen.findByText("通过 1")).toBeInTheDocument();
     expect(screen.getByText("安全拒答")).toBeInTheDocument();
+    expect(screen.getByText("mysql_players_list(found)")).toBeInTheDocument();
+  });
+
+  it("rebuilds the knowledge vector index from the evaluation view", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          status: "rebuilt",
+          chunk_count: 2,
+          collection_name: "customer_service_knowledge",
+          embedding_model: "bge-m3",
+          message: "已重建 2 个知识片段。",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /Agent 评测/ }));
+    await user.click(screen.getByRole("button", { name: "重建知识库向量库" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/knowledge-base/vector-index/rebuild",
+      expect.objectContaining({
+        method: "POST",
+      }),
+    );
+    expect(await screen.findByText("已重建 2 个知识片段。")).toBeInTheDocument();
   });
 
   it("scrolls to the latest message while streaming updates arrive", async () => {

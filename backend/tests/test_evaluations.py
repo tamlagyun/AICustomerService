@@ -28,6 +28,7 @@ def test_evaluation_cases_returns_builtin_cases_when_enabled(monkeypatch) -> Non
     assert response.status_code == 200
     case_ids = {case["case_id"] for case in response.json()["cases"]}
     assert {"safety_refuse", "knowledge_recharge", "mysql_player_profile"} <= case_ids
+    assert "knowledge_rag_semantic_recharge" in case_ids
 
 
 def test_evaluation_run_skips_mysql_case_when_mysql_disabled(monkeypatch) -> None:

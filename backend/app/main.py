@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.evaluations import EvaluationRunRequest, ensure_evaluation_enabled, list_evaluation_cases
 from app.evaluations import run_evaluation_suite
 from app.logging_config import configure_logging
+from app.rag.chroma_store import rebuild_knowledge_vector_index
 from app.schemas import ChatRequest, ChatResponse
 
 settings = get_settings()
@@ -44,6 +45,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         message=request.message,
         model_provider=request.model_provider,
         use_planner=request.use_planner,
+        knowledge_source=request.knowledge_source,
     )
 
 
@@ -57,6 +59,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 message=request.message,
                 model_provider=request.model_provider,
                 use_planner=request.use_planner,
+                knowledge_source=request.knowledge_source,
             ):
                 yield _format_sse(event["event"], event["data"])
         except Exception:
@@ -79,6 +82,11 @@ async def evaluation_cases() -> dict:
 async def evaluation_run(request: EvaluationRunRequest) -> dict:
     ensure_evaluation_enabled()
     return await run_evaluation_suite(request)
+
+
+@app.post("/api/knowledge-base/vector-index/rebuild")
+async def knowledge_vector_index_rebuild() -> dict:
+    return rebuild_knowledge_vector_index()
 
 
 def _format_sse(event: str, data: dict) -> str:

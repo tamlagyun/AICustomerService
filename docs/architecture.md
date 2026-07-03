@@ -186,16 +186,37 @@ amap_weather      -> maps_weather
 
 ## 知识库检索
 
-当前阶段先使用轻量关键词检索：
+当前知识库检索分为两条路径：
 
 - 支持读取 `.md`、`.html`、`.htm` 文件。
 - 按 Markdown 标题或 HTML 标题分块。
-- 根据玩家问题和知识片段的关键词重叠排序。
+- 前端聊天页通过 `knowledge_source` 选择 `doc` 或 `vector`。
+- `doc` 路径支持 `keyword`、`vector`、`hybrid` 三种本地检索模式，默认 `hybrid`。
+- `keyword` 根据玩家问题和知识片段的关键词重叠排序。
+- `doc` 路径里的 `vector` 使用本地 Hashing/字符 n-gram 向量索引做语义相似度检索。
+- `hybrid` 合并关键词分数和向量相似度。
+- `vector` 路径使用 Ollama embedding 模型把玩家问题转成向量，再查询 Chroma 持久化向量库。
 - 返回回复内容和来源引用。
-- 开发阶段每次请求都会重新读取知识库文件，新增或修改文件后无需重启服务。
-- 为避免单个短词误匹配，检索结果需要达到最低匹配分数才会被采用。
+- `doc` 路径每次请求都会重新读取知识库文件，新增或修改文件后无需重启服务。
+- 向量索引保存到 `VECTOR_STORE_DIR/knowledge_base_vector_index.json`，根据知识库文件内容哈希自动刷新。
+- Chroma 向量库保存到 `CHROMA_PERSIST_DIR`，不会在聊天时自动重建。
 
-这能先跑通知识库问答闭环。后续当文档量增大或语义匹配要求提高时，再升级为 Embedding + 向量库检索。
+Chroma 重建由前端“Agent 评测”页的“重建知识库向量库”按钮触发，也可以直接调用：
+
+```text
+POST /api/knowledge-base/vector-index/rebuild
+```
+
+重建流程：
+
+```text
+knowledge_base/*.md|html
+  -> 文档分块
+  -> Ollama /api/embed，默认模型 bge-m3
+  -> Chroma collection: customer_service_knowledge
+```
+
+如果玩家在聊天页选择 `vector`，但 Chroma 还没有建立或 Ollama/Chroma 不可用，后端返回明确提示，不静默回退到 `doc` 路径。
 
 ## 数据库访问原则
 

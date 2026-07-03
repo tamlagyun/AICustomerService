@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -8,6 +8,7 @@ class ChatRequest(BaseModel):
     player_id: str | None = None
     model_provider: str | None = Field(default=None, max_length=32)
     use_planner: bool = False
+    knowledge_source: Literal["doc", "vector"] = "doc"
     message: str = Field(min_length=1, max_length=4000)
 
 

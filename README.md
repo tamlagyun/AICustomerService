@@ -338,7 +338,7 @@ session_id=local-session
 
 ## 知识库
 
-当前支持把 Markdown 和 HTML 文件放入 `knowledge_base/`。后端会读取文件并按标题分块，使用轻量关键词检索返回相关内容和来源。
+当前支持把 Markdown 和 HTML 文件放入 `knowledge_base/`。后端会读取文件并按标题分块，使用轻量 RAG 检索返回相关内容和来源。
 
 知识库文件在每次请求时读取。开发阶段新增或修改 `knowledge_base/` 下的 `.md`、`.html`、`.htm` 文件后，不需要重启后端。
 
@@ -349,7 +349,57 @@ Markdown 标题支持下面两种写法：
 ##充值未到账怎么办
 ```
 
-第一版暂不使用向量库，等知识库规模和问答效果需求明确后再升级。
+前端聊天页可以选择两种知识来源：
+
+```text
+doc文档  读取 Markdown/HTML 文档，使用当前本地检索模式
+向量库   使用 Ollama embedding + Chroma 向量库检索
+```
+
+`doc文档` 模式支持三种本地检索模式：
+
+```env
+KNOWLEDGE_SOURCE_DEFAULT=doc
+KNOWLEDGE_RETRIEVAL_MODE=hybrid
+KNOWLEDGE_VECTOR_MIN_SCORE=0.05
+VECTOR_STORE_DIR=./data/vector_store
+```
+
+可选模式：
+
+```text
+keyword  只使用关键词重叠检索
+vector   只使用本地轻量向量检索
+hybrid   关键词 + 向量合并，默认推荐
+```
+
+本地轻量向量索引会保存到 `VECTOR_STORE_DIR/knowledge_base_vector_index.json`。索引根据知识库文件内容哈希自动判断是否重建，因此修改知识库文件后不需要手动刷新。
+
+`向量库` 模式使用真实 embedding 模型和 Chroma。因为知识库文件可能经常变化，后端不会在聊天时自动重建 Chroma；需要在前端“Agent 评测”页面点击“重建知识库向量库”，或直接调用：
+
+```text
+POST /api/knowledge-base/vector-index/rebuild
+```
+
+向量库配置：
+
+```env
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_EMBEDDING_MODEL=bge-m3
+OLLAMA_EMBEDDING_TIMEOUT_SECONDS=30
+CHROMA_PERSIST_DIR=./data/chroma
+CHROMA_COLLECTION_NAME=customer_service_knowledge
+CHROMA_TOP_K=3
+CHROMA_MIN_SCORE=0.2
+```
+
+本地使用前需要先安装并启动 Ollama，然后拉取 embedding 模型：
+
+```powershell
+ollama pull bge-m3
+```
+
+如果前端选择“向量库”但还没有重建 Chroma，后端会返回明确提示，不会静默回退到 `doc文档`。
 
 ## MySQL 玩家数据
 

@@ -8,7 +8,7 @@ from langgraph.graph import END, StateGraph
 
 from app.agent.decision import AgentAction, AgentDecision
 from app.agent.map_agent import run_map_agent
-from app.agent.planner import AgentPlan, PlanParseError, parse_agent_plan
+from app.agent.planner import AgentPlan, PlanParseError, PlanStep, parse_agent_plan
 from app.agent_audit import write_agent_audit_event
 from app.avatar_generation import AvatarGenerationResult, build_avatar_generator
 from app.config import Settings, get_settings
@@ -18,6 +18,7 @@ from app.llm import LLMClientProtocol, build_llm_client
 from app.map_tools import MapToolResult
 from app.player_data import PlayerDataResult, PlayerDataStatus, build_player_data_tools
 from app.prompt_registry import PromptNotFoundError, get_prompt_versions, load_prompt
+from app.rag.chroma_store import ChromaIndexNotReady, ChromaUnavailableError, EmbeddingProviderError
 from app.safety import SafetyAction, SafetyDecision, analyze_safety, redact_sensitive_text
 from app.schemas import ChatImage, ChatResponse, ChatSource, ChatTable
 from app.table_adapter import (
@@ -47,6 +48,7 @@ class CustomerServiceState(TypedDict, total=False):
     player_id: str | None
     message: str
     normalized_message: str
+    knowledge_source: str
     question_type: QuestionType
     safety_decision: SafetyDecision
     llm_client: LLMClientProtocol | None
@@ -59,6 +61,7 @@ class CustomerServiceState(TypedDict, total=False):
     planner_fallback_reason: str
     use_llm_final_reply: bool
     knowledge_results: list[KnowledgeChunk]
+    knowledge_unavailable_reason: str
     player_data_result: PlayerDataResult
     map_result: MapToolResult
     avatar_result: AvatarGenerationResult
@@ -217,6 +220,7 @@ async def run_customer_service_agent(
     player_id: str | None = None,
     model_provider: str | None = None,
     use_planner: bool = False,
+    knowledge_source: str | None = None,
     llm_client: LLMClientProtocol | None = None,
     status_queue: asyncio.Queue[str] | None = None,
 ) -> ChatResponse:
@@ -245,6 +249,7 @@ async def run_customer_service_agent(
             "player_id": player_id,
             "message": message,
             "use_planner": use_planner,
+            "knowledge_source": _normalize_knowledge_source(knowledge_source, settings),
             "conversation_history": memory.get_recent_messages(session_id),
             "llm_client": selected_llm_client,
             "status_queue": status_queue,
@@ -290,6 +295,7 @@ async def stream_customer_service_agent(
     player_id: str | None = None,
     model_provider: str | None = None,
     use_planner: bool = False,
+    knowledge_source: str | None = None,
     llm_client: LLMClientProtocol | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     yield {"event": "status", "data": {"message": "正在分析问题"}}
@@ -308,6 +314,7 @@ async def stream_customer_service_agent(
             message=message,
             model_provider=model_provider,
             use_planner=use_planner,
+            knowledge_source=knowledge_source,
             llm_client=streaming_llm_client,
             status_queue=status_queue,
         )
@@ -377,7 +384,10 @@ async def plan_with_llm(state: CustomerServiceState) -> CustomerServiceState:
                 state.get("conversation_history", []),
             )
         )
-        plan = parse_agent_plan(response.content)
+        plan = _correct_plan_with_high_confidence_rules(
+            state,
+            parse_agent_plan(response.content),
+        )
     except PromptNotFoundError:
         logger.exception("Prompt loading failed during Planner; session_id=%s", state.get("session_id"))
         raise
@@ -442,7 +452,7 @@ async def decide_action_with_llm(state: CustomerServiceState) -> CustomerService
         _emit_status(state, f"大模型决策失败，正在使用本地规则决策：{type(exc).__name__}")
         return state
 
-    return {**state, "llm_decision": decision}
+    return {**state, "llm_decision": _correct_decision_with_high_confidence_rules(state, decision)}
 
 
 def route_llm_decision(
@@ -486,6 +496,88 @@ def route_llm_decision(
     return "fallback"
 
 
+def _correct_decision_with_high_confidence_rules(
+    state: CustomerServiceState,
+    decision: AgentDecision,
+) -> AgentDecision:
+    message = state.get("normalized_message", state.get("message", ""))
+    overridable_actions = {
+        AgentAction.ASK_CLARIFICATION,
+        AgentAction.DIRECT_ANSWER,
+        AgentAction.FALLBACK,
+    }
+
+    if (
+        decision.action in overridable_actions
+        and _looks_like_player_attraction_batch_request(message)
+    ):
+        return _players_attractions_decision(
+            reason=f"{decision.reason}；后端高置信规则：需要先查询玩家列表再查询广州景点"
+        )
+
+    if decision.action in overridable_actions and _looks_like_knowledge_issue(message):
+        return AgentDecision(
+            action=AgentAction.KNOWLEDGE_BASE,
+            reason=f"{decision.reason}；后端高置信规则：客服知识类问题优先检索知识库",
+        )
+
+    return decision
+
+
+def _correct_plan_with_high_confidence_rules(
+    state: CustomerServiceState,
+    plan: AgentPlan,
+) -> AgentPlan:
+    message = state.get("normalized_message", state.get("message", ""))
+    if not _looks_like_player_attraction_batch_request(message):
+        return plan
+
+    if _plan_has_action(plan, AgentAction.MYSQL_PLAYERS_LIST) and _plan_has_map_action(plan):
+        return plan
+
+    return AgentPlan(
+        final_task=_players_attractions_final_task(),
+        steps=[
+            PlanStep(
+                action=AgentAction.MYSQL_PLAYERS_LIST,
+                reason="后端高置信规则：需要先查询玩家列表和 desc 字段",
+                arguments={"limit": 100},
+            ),
+            PlanStep(
+                action=AgentAction.AMAP_PLACE_SEARCH,
+                reason="后端高置信规则：需要查询广州真实景点数据",
+                arguments={
+                    "keywords": "旅游景点",
+                    "city": "广州",
+                    "presentation": {"mode": "table"},
+                },
+                final_task=_players_attractions_final_task(),
+            ),
+        ],
+    )
+
+
+def _players_attractions_decision(reason: str) -> AgentDecision:
+    return AgentDecision(
+        action=AgentAction.MYSQL_PLAYERS_LIST,
+        reason=reason,
+        arguments={"limit": 100, "presentation": {"mode": "table"}},
+        final_task=_players_attractions_final_task(),
+    )
+
+
+def _players_attractions_final_task() -> str:
+    return "结合玩家资料、desc 类型和广州景点结果，推荐适合的景点并说明游玩后的心情收获"
+
+
+def _plan_has_action(plan: AgentPlan, action: AgentAction) -> bool:
+    return any(step.action == action for step in plan.steps)
+
+
+def _plan_has_map_action(plan: AgentPlan) -> bool:
+    return any(_is_map_decision(step.to_decision()) for step in plan.steps)
+
+
 def classify_question(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在使用本地规则决策")
     normalized_message = state["normalized_message"]
@@ -497,7 +589,7 @@ def classify_question(state: CustomerServiceState) -> CustomerServiceState:
         question_type = "player_data"
     elif state.get("player_id") and any(keyword in normalized_message for keyword in ["资料", "信息"]):
         question_type = "player_data"
-    elif any(keyword in normalized_message for keyword in ["充值", "不到账", "订单", "封禁"]):
+    elif _looks_like_knowledge_issue(normalized_message):
         question_type = "knowledge"
     elif any(
         keyword in normalized_message
@@ -528,7 +620,23 @@ def _looks_like_players_list_query(message: str) -> bool:
     return any(keyword in message for keyword in ["所有玩家", "全部玩家", "玩家列表"])
 
 
+def _looks_like_knowledge_issue(message: str) -> bool:
+    return any(keyword in message for keyword in ["充值", "不到账", "订单", "封禁"])
+
+
+def _looks_like_player_attraction_batch_request(message: str) -> bool:
+    has_city = "广州" in message
+    asks_attractions = any(keyword in message for keyword in ["景点", "旅游", "游玩", "旅行", "玩"])
+    mentions_player_profile = any(
+        keyword in message
+        for keyword in ["玩家资料", "玩家数据", "玩家特色", "desc", "个性", "类型", "他们"]
+    )
+    return has_city and asks_attractions and mentions_player_profile
+
+
 def route_after_knowledge(state: CustomerServiceState) -> Literal["knowledge", "general", "fallback"]:
+    if state.get("knowledge_unavailable_reason"):
+        return "fallback"
     if state.get("knowledge_results"):
         return "knowledge"
     if state.get("question_type") == "general":
@@ -545,14 +653,25 @@ def route_after_player_data(state: CustomerServiceState) -> Literal["avatar", "p
 
 def retrieve_knowledge(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在检索知识库")
-    results = KnowledgeBaseSearch(get_settings().knowledge_base_dir).search(
-        state["normalized_message"],
-        limit=1,
-    )
+    try:
+        results = KnowledgeBaseSearch(
+            get_settings().knowledge_base_dir,
+            knowledge_source=state.get("knowledge_source"),
+        ).search(
+            state["normalized_message"],
+            limit=1,
+        )
+        knowledge_unavailable_reason = ""
+    except (ChromaIndexNotReady, ChromaUnavailableError, EmbeddingProviderError) as exc:
+        logger.exception("Knowledge vector search failed; session_id=%s", state.get("session_id"))
+        results = []
+        knowledge_unavailable_reason = str(exc)
+        _emit_status(state, "向量知识库不可用，正在准备提示")
     next_state = {
         **state,
         "knowledge_results": results,
-        "use_llm_final_reply": _should_use_llm_final_reply(state),
+        "knowledge_unavailable_reason": knowledge_unavailable_reason,
+        "use_llm_final_reply": bool(results) and _should_use_llm_final_reply(state),
     }
     return _complete_current_plan_step(next_state)
 
@@ -797,9 +916,17 @@ def generate_avatar_reply(state: CustomerServiceState) -> CustomerServiceState:
 
 def generate_no_knowledge_reply(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在准备回复")
+    unavailable_reason = state.get("knowledge_unavailable_reason")
+    if unavailable_reason:
+        reply = (
+            f"{unavailable_reason}。请先在 Agent 评测页面点击“重建知识库向量库”；"
+            "如果刚重建过，请确认 Ollama 服务已启动并已拉取 bge-m3 embedding 模型。"
+        )
+    else:
+        reply = "这个问题需要进一步核对资料。请补充服务器、角色 ID 和具体问题描述。"
     return {
         **state,
-        "reply": "这个问题需要进一步核对资料。请补充服务器、角色 ID 和具体问题描述。",
+        "reply": reply,
         "sources": [],
         "handoff": False,
     }
@@ -886,6 +1013,7 @@ def _write_chat_audit_event(
                 "message": message,
                 "reply": response.reply,
                 "handoff": response.handoff,
+                "knowledge_source": final_state.get("knowledge_source") if final_state else None,
                 "use_planner": bool(final_state.get("use_planner")) if final_state else False,
                 "llm_action": _audit_action(final_state.get("llm_decision") if final_state else None),
                 "map_action": _audit_action(final_state.get("map_decision") if final_state else None),
@@ -971,7 +1099,7 @@ def _audit_tools(state: CustomerServiceState | None) -> list[dict[str, object]]:
                 "tool": "knowledge_base",
                 "status": "found",
                 "count": len(knowledge_results),
-                "sources": [chunk.source for chunk in knowledge_results],
+                "sources": [chunk.reference for chunk in knowledge_results],
             }
         )
 
@@ -1004,6 +1132,14 @@ def _log_prompt_versions(session_id: str, settings: Settings) -> None:
         versions["followup_decision"],
         versions["final_reply"],
     )
+
+
+def _normalize_knowledge_source(source: str | None, settings: Settings) -> str:
+    selected_source = source or settings.knowledge_source_default
+    normalized = selected_source.strip().lower()
+    if normalized in {"doc", "vector"}:
+        return normalized
+    return "doc"
 
 
 def _planner_messages(

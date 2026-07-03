@@ -2,6 +2,7 @@ import asyncio
 from functools import lru_cache
 import json
 import logging
+import re
 from typing import Any, AsyncIterator, Literal, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -61,6 +62,7 @@ class CustomerServiceState(TypedDict, total=False):
     planner_fallback_reason: str
     use_llm_final_reply: bool
     knowledge_results: list[KnowledgeChunk]
+    knowledge_precheck_results: list[KnowledgeChunk]
     knowledge_unavailable_reason: str
     player_data_result: PlayerDataResult
     map_result: MapToolResult
@@ -452,7 +454,21 @@ async def decide_action_with_llm(state: CustomerServiceState) -> CustomerService
         _emit_status(state, f"大模型决策失败，正在使用本地规则决策：{type(exc).__name__}")
         return state
 
-    return {**state, "llm_decision": _correct_decision_with_high_confidence_rules(state, decision)}
+    corrected_decision = _correct_decision_with_high_confidence_rules(state, decision)
+    next_state = {**state, "llm_decision": corrected_decision}
+    knowledge_results = _knowledge_results_for_overridable_decision(next_state, corrected_decision)
+    if knowledge_results:
+        return {
+            **next_state,
+            "knowledge_precheck_results": knowledge_results,
+            "llm_decision": AgentDecision(
+                action=AgentAction.KNOWLEDGE_BASE,
+                reason=(
+                    f"{corrected_decision.reason}；后端高置信规则：当前问题精确命中知识库标题"
+                ),
+            ),
+        }
+    return next_state
 
 
 def route_llm_decision(
@@ -578,6 +594,54 @@ def _plan_has_map_action(plan: AgentPlan) -> bool:
     return any(_is_map_decision(step.to_decision()) for step in plan.steps)
 
 
+def _knowledge_results_for_overridable_decision(
+    state: CustomerServiceState,
+    decision: AgentDecision,
+) -> list[KnowledgeChunk]:
+    if state.get("knowledge_source") != "doc":
+        return []
+    if decision.action not in {
+        AgentAction.ASK_CLARIFICATION,
+        AgentAction.DIRECT_ANSWER,
+        AgentAction.FALLBACK,
+    }:
+        return []
+
+    message = state.get("normalized_message", state.get("message", ""))
+    try:
+        results = KnowledgeBaseSearch(
+            get_settings().knowledge_base_dir,
+            retrieval_mode="keyword",
+            knowledge_source="doc",
+        ).search(message, limit=1)
+    except Exception:
+        logger.exception("Knowledge precheck failed; session_id=%s", state.get("session_id"))
+        return []
+
+    if results and _is_high_confidence_knowledge_match(message, results[0]):
+        return results
+    return []
+
+
+def _is_high_confidence_knowledge_match(message: str, chunk: KnowledgeChunk) -> bool:
+    normalized_message = _normalize_knowledge_match_text(message)
+    normalized_title = _normalize_knowledge_match_text(chunk.title)
+    return bool(
+        normalized_message
+        and normalized_title
+        and len(normalized_message) >= 2
+        and (
+            normalized_message == normalized_title
+            or normalized_message in normalized_title
+            or normalized_title in normalized_message
+        )
+    )
+
+
+def _normalize_knowledge_match_text(text: str) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", text.lower())
+
+
 def classify_question(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在使用本地规则决策")
     normalized_message = state["normalized_message"]
@@ -653,14 +717,18 @@ def route_after_player_data(state: CustomerServiceState) -> Literal["avatar", "p
 
 def retrieve_knowledge(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在检索知识库")
+    precheck_results = state.get("knowledge_precheck_results")
     try:
-        results = KnowledgeBaseSearch(
-            get_settings().knowledge_base_dir,
-            knowledge_source=state.get("knowledge_source"),
-        ).search(
-            state["normalized_message"],
-            limit=1,
-        )
+        if precheck_results is not None:
+            results = precheck_results
+        else:
+            results = KnowledgeBaseSearch(
+                get_settings().knowledge_base_dir,
+                knowledge_source=state.get("knowledge_source"),
+            ).search(
+                state["normalized_message"],
+                limit=1,
+            )
         knowledge_unavailable_reason = ""
     except (ChromaIndexNotReady, ChromaUnavailableError, EmbeddingProviderError) as exc:
         logger.exception("Knowledge vector search failed; session_id=%s", state.get("session_id"))
@@ -671,7 +739,9 @@ def retrieve_knowledge(state: CustomerServiceState) -> CustomerServiceState:
         **state,
         "knowledge_results": results,
         "knowledge_unavailable_reason": knowledge_unavailable_reason,
-        "use_llm_final_reply": bool(results) and _should_use_llm_final_reply(state),
+        "use_llm_final_reply": bool(results)
+        and precheck_results is None
+        and _should_use_llm_final_reply(state),
     }
     return _complete_current_plan_step(next_state)
 

@@ -54,3 +54,20 @@ def test_search_finds_markdown_heading_without_space(tmp_path: Path) -> None:
     assert len(results) == 1
     assert results[0].title == "我不认识你怎么办？"
     assert "照照镜子" in results[0].content
+
+
+def test_search_finds_short_exact_markdown_heading_without_space(tmp_path: Path) -> None:
+    kb_dir = tmp_path / "kb"
+    kb_dir.mkdir()
+    (kb_dir / "chat.md").write_text(
+        "# 示例\n\n##你吃过屎吗？\n\n你吃过呀，那你告诉我屎是什么味道?",
+        encoding="utf-8",
+    )
+
+    search = KnowledgeBaseSearch(kb_dir)
+
+    results = search.search("你吃过屎吗？")
+
+    assert len(results) == 1
+    assert results[0].title == "你吃过屎吗？"
+    assert "什么味道" in results[0].content

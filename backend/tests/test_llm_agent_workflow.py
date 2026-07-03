@@ -394,6 +394,29 @@ async def test_llm_clarification_for_recharge_issue_uses_knowledge_base() -> Non
     assert "充值未到账" in response.reply
 
 
+async def test_llm_direct_refusal_uses_exact_knowledge_base_match() -> None:
+    llm_client = FakeLLMClient(
+        decision=AgentDecision(
+            action=AgentAction.DIRECT_ANSWER,
+            reason="模型把知识库问题误判为应拒答闲聊",
+            direct_reply="抱歉，我无法回答这个问题。",
+        ),
+        final_reply="不应该再次调用大模型生成",
+    )
+
+    response = await run_customer_service_agent(
+        session_id="exact-knowledge-override-session",
+        message="你吃过屎吗？",
+        llm_client=llm_client,
+    )
+
+    assert response.sources
+    assert response.sources[0].source_type == "knowledge_base"
+    assert response.sources[0].reference == "sample.md#你吃过屎吗？"
+    assert "什么味道" in response.reply
+    assert llm_client.final_messages is None
+
+
 async def test_llm_agent_uses_selected_vector_knowledge_source(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

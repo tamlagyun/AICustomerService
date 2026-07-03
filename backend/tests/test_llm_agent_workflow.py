@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 
 import pytest
@@ -938,6 +939,49 @@ async def test_llm_agent_logs_prompt_versions(caplog) -> None:
         "Prompt versions selected; session_id=prompt-version-session "
         "decision=v1.0 followup_decision=v1.0 final_reply=v1.0"
     ) in caplog.text
+
+
+async def test_customer_service_writes_agent_audit_log(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_AUDIT_LOG_ENABLED", "true")
+    get_settings.cache_clear()
+    player_tools = FakePlayerDataTools()
+    monkeypatch.setattr(
+        "app.agent.customer_service.build_player_data_tools",
+        lambda: player_tools,
+    )
+    llm_client = FakeLLMClient(
+        decision=AgentDecision(
+            action=AgentAction.MYSQL_PLAYER_PROFILE,
+            reason="玩家要求查询资料",
+            arguments={"player_id": "1"},
+            final_task="总结玩家资料",
+        ),
+        final_reply="玩家 ai大名 喜欢研究机制，适合策略型玩法。",
+    )
+
+    try:
+        response = await run_customer_service_agent(
+            session_id="audit-session",
+            player_id="1",
+            message="player_id=1请查询我的资料",
+            llm_client=llm_client,
+        )
+    finally:
+        get_settings.cache_clear()
+
+    audit_file = tmp_path / "agent_audit.jsonl"
+    payload = json.loads(audit_file.read_text(encoding="utf-8").splitlines()[-1])
+    assert payload["event_type"] == "chat_completed"
+    assert payload["session_id"] == "audit-session"
+    assert payload["player_id"] == "1"
+    assert payload["message"] == "player_id=1请查询我的资料"
+    assert payload["reply"] == response.reply
+    assert payload["handoff"] is False
+    assert payload["llm_action"] == "mysql_player_profile"
+    assert payload["tools"][0]["tool"] == "mysql_player_profile"
+    assert payload["tools"][0]["status"] == "found"
+    assert payload["sources"] == []
 
 
 async def test_llm_agent_fails_clearly_when_configured_prompt_version_is_missing(

@@ -8,9 +8,11 @@ from fastapi.staticfiles import StaticFiles
 
 from app.agent import run_customer_service_agent, stream_customer_service_agent
 from app.config import get_settings
+from app.logging_config import configure_logging
 from app.schemas import ChatRequest, ChatResponse
 
 settings = get_settings()
+configure_logging(settings)
 
 app = FastAPI(title="Customer Service AI Agent API")
 generated_dir = Path(__file__).resolve().parents[2] / "generated"

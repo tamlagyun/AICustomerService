@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     prompt_decision_version: str = "v1.0"
     prompt_followup_decision_version: str = "v1.0"
     prompt_final_reply_version: str = "v1.0"
+    log_dir: str = "../logs"
+    log_level: str = "INFO"
+    log_max_bytes: int = 5_242_880
+    log_backup_count: int = 5
+    agent_audit_log_enabled: bool = True
 
     model_config = SettingsConfigDict(env_file="../.env", env_file_encoding="utf-8", extra="ignore")
 

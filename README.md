@@ -199,6 +199,27 @@ PROMPT_FINAL_REPLY_VERSION=v1.0
 
 如果配置了不存在的 Prompt 版本，后端会记录错误日志并停止本次大模型流程，避免静默回退到错误行为。
 
+## 日志持久化
+
+后端启动时会初始化本地文件日志：
+
+```env
+LOG_DIR=../logs
+LOG_LEVEL=INFO
+LOG_MAX_BYTES=5242880
+LOG_BACKUP_COUNT=5
+AGENT_AUDIT_LOG_ENABLED=true
+```
+
+默认日志文件：
+
+```text
+logs/app.log           后端运行日志、异常日志、大模型失败日志
+logs/agent_audit.jsonl Agent 审计日志，一行一个 JSON
+```
+
+`agent_audit.jsonl` 会记录每次聊天完成后的关键信息，包括 `session_id`、`player_id`、玩家问题、最终回复、是否转人工、来源、表格摘要、模型动作和工具调用摘要。该文件用于排查 Agent 决策链路，不建议提交到仓库。
+
 启用后流程：
 
 ```text

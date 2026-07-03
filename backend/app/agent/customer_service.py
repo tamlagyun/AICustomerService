@@ -8,6 +8,7 @@ from langgraph.graph import END, StateGraph
 
 from app.agent.decision import AgentAction, AgentDecision
 from app.agent.map_agent import run_map_agent
+from app.agent_audit import write_agent_audit_event
 from app.avatar_generation import AvatarGenerationResult, build_avatar_generator
 from app.config import Settings, get_settings
 from app.conversation_memory import ConversationMessage, get_conversation_memory
@@ -195,14 +196,21 @@ async def run_customer_service_agent(
     llm_client: LLMClientProtocol | None = None,
     status_queue: asyncio.Queue[str] | None = None,
 ) -> ChatResponse:
+    settings = get_settings()
     memory = get_conversation_memory()
     capability_reply = _system_capability_reply(message)
     if capability_reply is not None:
         response = ChatResponse(reply=capability_reply)
         _record_conversation_exchange(session_id, message, response.reply)
+        _write_chat_audit_event(
+            settings,
+            session_id=session_id,
+            player_id=player_id,
+            message=message,
+            response=response,
+        )
         return response
 
-    settings = get_settings()
     selected_llm_client = llm_client if llm_client is not None else build_llm_client(model_provider)
     if selected_llm_client is not None:
         _log_prompt_versions(session_id, settings)
@@ -225,6 +233,14 @@ async def run_customer_service_agent(
         tables=final_state.get("tables", []),
     )
     _record_conversation_exchange(session_id, message, response.reply)
+    _write_chat_audit_event(
+        settings,
+        session_id=session_id,
+        player_id=player_id,
+        message=message,
+        response=response,
+        final_state=final_state,
+    )
     return response
 
 
@@ -749,6 +765,100 @@ def _record_conversation_exchange(session_id: str, user_message: str, assistant_
     memory = get_conversation_memory()
     memory.append_message(session_id, "user", user_message)
     memory.append_message(session_id, "assistant", assistant_reply)
+
+
+def _write_chat_audit_event(
+    settings: Settings,
+    *,
+    session_id: str,
+    player_id: str | None,
+    message: str,
+    response: ChatResponse,
+    final_state: CustomerServiceState | None = None,
+) -> None:
+    try:
+        write_agent_audit_event(
+            settings,
+            {
+                "event_type": "chat_completed",
+                "session_id": session_id,
+                "player_id": player_id,
+                "message": message,
+                "reply": response.reply,
+                "handoff": response.handoff,
+                "llm_action": _audit_action(final_state.get("llm_decision") if final_state else None),
+                "map_action": _audit_action(final_state.get("map_decision") if final_state else None),
+                "sources": [source.model_dump() for source in response.sources],
+                "images": [image.model_dump() for image in response.images],
+                "tables": [
+                    {
+                        "title": table.title,
+                        "row_count": len(table.rows),
+                        "columns": [column.model_dump() for column in table.columns],
+                    }
+                    for table in response.tables
+                ],
+                "tools": _audit_tools(final_state),
+            },
+        )
+    except Exception:
+        logger.exception("Agent audit logging failed; session_id=%s", session_id)
+
+
+def _audit_action(decision: AgentDecision | None) -> str | None:
+    if decision is None:
+        return None
+    return str(decision.action)
+
+
+def _audit_tools(state: CustomerServiceState | None) -> list[dict[str, object]]:
+    if state is None:
+        return []
+
+    tools: list[dict[str, object]] = []
+    player_data_result = state.get("player_data_result")
+    if player_data_result is not None:
+        tools.append(
+            {
+                "tool": _tool_name_for_prompt(state),
+                "status": str(player_data_result.status),
+                "summary": player_data_result.summary,
+            }
+        )
+
+    map_result = state.get("map_result")
+    if map_result is not None:
+        tools.append(
+            {
+                "tool": _map_tool_name(map_result) or "amap_mcp",
+                "status": str(map_result.status),
+                "summary": map_result.summary,
+            }
+        )
+
+    avatar_result = state.get("avatar_result")
+    if avatar_result is not None:
+        tools.append(
+            {
+                "tool": "avatar_generate",
+                "status": str(avatar_result.status),
+                "summary": avatar_result.summary,
+                "url": avatar_result.url,
+            }
+        )
+
+    knowledge_results = state.get("knowledge_results", [])
+    if knowledge_results:
+        tools.append(
+            {
+                "tool": "knowledge_base",
+                "status": "found",
+                "count": len(knowledge_results),
+                "sources": [chunk.source for chunk in knowledge_results],
+            }
+        )
+
+    return tools
 
 
 def _format_conversation_history(messages: list[ConversationMessage]) -> str:

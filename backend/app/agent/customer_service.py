@@ -6,6 +6,7 @@ from typing import Any, AsyncIterator, Literal
 from langgraph.graph import END, StateGraph
 
 from app.agent.audit import write_chat_audit_event
+from app.agent.context_budget import ContextBudget, apply_context_budget
 from app.agent.decision import AgentAction, AgentDecision
 from app.agent.map_agent import MapAgentResult, run_map_agent
 from app.agent.planner import PlanParseError, parse_agent_plan
@@ -34,10 +35,11 @@ from app.agent.state import CustomerServiceState, QuestionType
 from app.agent.streaming import StreamingLLMClient
 from app.agent.trace import AgentTrace, TraceEventType
 from app.avatar_generation import build_avatar_generator
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.conversation_memory import get_conversation_memory
 from app.knowledge_base import KnowledgeBaseSearch
 from app.llm import LLMClientProtocol, build_llm_client
+from app.llm_usage import LLMUsageSummary
 from app.llm_middleware import LLMCallContext, wrap_llm_client
 from app.map_tools import MapToolResult, MapToolStatus
 from app.player_data import PlayerDataResult, PlayerDataStatus, build_player_data_tools
@@ -229,6 +231,7 @@ async def run_customer_service_agent(
         return response
 
     agent_trace = AgentTrace()
+    llm_usage_summary = LLMUsageSummary()
     base_llm_client = llm_client if llm_client is not None else build_llm_client(model_provider)
     selected_llm_client = _wrap_request_llm_client(
         base_llm_client,
@@ -239,6 +242,8 @@ async def run_customer_service_agent(
             injected=llm_client is not None,
         ),
         agent_trace=agent_trace,
+        usage_summary=llm_usage_summary,
+        settings=settings,
     )
     if selected_llm_client is not None:
         log_prompt_versions(session_id, settings)
@@ -252,6 +257,7 @@ async def run_customer_service_agent(
             "knowledge_source": normalize_knowledge_source(knowledge_source, settings),
             "conversation_history": memory.get_recent_messages(session_id),
             "llm_client": selected_llm_client,
+            "llm_usage_summary": llm_usage_summary,
             "status_queue": status_queue,
             "agent_trace": agent_trace,
         }
@@ -484,11 +490,16 @@ async def decide_action_with_llm(state: CustomerServiceState) -> CustomerService
     started_at = _trace_started(state, TraceEventType.LLM_STARTED, "decide_action")
     try:
         _emit_status(state, "正在请求大模型决策")
-        decision = await llm_client.decide_action(
+        messages = _apply_context_budget_to_messages(
+            state,
             decision_messages(
                 state["normalized_message"],
                 state.get("conversation_history", []),
-            )
+            ),
+            protected_text=state["normalized_message"],
+        )
+        decision = await llm_client.decide_action(
+            messages
         )
     except PromptNotFoundError:
         _trace_finished(
@@ -988,7 +999,13 @@ async def generate_llm_final_reply(state: CustomerServiceState) -> CustomerServi
 
     started_at = _trace_started(state, TraceEventType.LLM_STARTED, "final_reply")
     try:
-        response = await llm_client.generate_reply(final_reply_messages(state))
+        messages = _apply_context_budget_to_messages(
+            state,
+            final_reply_messages(state),
+            protected_text=state.get("normalized_message", state.get("message", "")),
+            priority_markers=["工具结果：", "结构化工具数据：", "来源："],
+        )
+        response = await llm_client.generate_reply(messages)
     except PromptNotFoundError:
         _trace_finished(
             state,
@@ -1024,6 +1041,27 @@ def _emit_status(state: CustomerServiceState, message: str) -> None:
     status_queue = state.get("status_queue")
     if status_queue is not None:
         status_queue.put_nowait(message)
+
+
+def _apply_context_budget_to_messages(
+    state: CustomerServiceState,
+    messages: list[dict[str, str]],
+    *,
+    protected_text: str,
+    priority_markers: list[str] | None = None,
+) -> list[dict[str, str]]:
+    settings = get_settings()
+    result = apply_context_budget(
+        messages,
+        ContextBudget(
+            max_tokens=settings.llm_context_max_tokens,
+            reserved_reply_tokens=settings.llm_context_reserved_reply_tokens,
+        ),
+        protected_text=protected_text,
+        priority_markers=priority_markers,
+    )
+    state["context_budget_result"] = result
+    return result.messages
 
 
 def _trace_started(
@@ -1081,9 +1119,12 @@ def _wrap_request_llm_client(
     session_id: str,
     provider_name: str,
     agent_trace: AgentTrace,
+    usage_summary: LLMUsageSummary,
+    settings: Settings,
 ) -> LLMClientProtocol | None:
     if client is None:
         return None
+    input_price, output_price = _llm_token_prices_for_provider(settings, provider_name)
     return wrap_llm_client(
         client,
         LLMCallContext(
@@ -1091,6 +1132,9 @@ def _wrap_request_llm_client(
             model=_llm_context_model(client),
             session_id=session_id,
             agent_trace=agent_trace,
+            usage_summary=usage_summary,
+            input_token_price_per_1k=input_price,
+            output_token_price_per_1k=output_price,
         ),
     )
 
@@ -1116,6 +1160,21 @@ def _llm_context_model(client: LLMClientProtocol) -> str:
         if isinstance(nested_model, str) and nested_model:
             return nested_model
     return ""
+
+
+def _llm_token_prices_for_provider(settings: Settings, provider_name: str) -> tuple[float, float]:
+    normalized_provider = provider_name.strip().lower()
+    if normalized_provider == "qwen":
+        return (
+            settings.qwen_input_token_price_per_1k,
+            settings.qwen_output_token_price_per_1k,
+        )
+    if normalized_provider == "deepseek":
+        return (
+            settings.deepseek_input_token_price_per_1k,
+            settings.deepseek_output_token_price_per_1k,
+        )
+    return 0.0, 0.0
 
 
 def _player_profile_decision_for_tool_call(state: CustomerServiceState) -> AgentDecision:

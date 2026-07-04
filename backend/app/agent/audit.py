@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 
 from app.agent.decision import AgentDecision
+from app.agent.context_budget import empty_context_budget_audit_payload
 from app.agent.prompting import map_tool_name, tool_name_for_prompt
 from app.agent.state import CustomerServiceState
 from app.agent_audit import write_agent_audit_event
 from app.config import Settings
+from app.llm_usage import empty_llm_usage_audit_payload
 from app.schemas import ChatResponse
 
 logger = logging.getLogger(__name__)
@@ -54,6 +56,8 @@ def write_chat_audit_event(
                 ],
                 "tools": _audit_tools(final_state),
                 **_audit_trace_summary(final_state),
+                **_audit_llm_usage_summary(final_state),
+                **_audit_context_budget_summary(final_state),
             },
         )
     except Exception:
@@ -140,3 +144,21 @@ def _audit_trace_summary(state: CustomerServiceState | None) -> dict[str, object
             "trace_duration_ms": 0,
         }
     return trace.summary()
+
+
+def _audit_llm_usage_summary(state: CustomerServiceState | None) -> dict[str, object]:
+    if state is None:
+        return empty_llm_usage_audit_payload()
+    usage_summary = state.get("llm_usage_summary")
+    if usage_summary is None:
+        return empty_llm_usage_audit_payload()
+    return usage_summary.to_audit_payload()
+
+
+def _audit_context_budget_summary(state: CustomerServiceState | None) -> dict[str, object]:
+    if state is None:
+        return empty_context_budget_audit_payload()
+    budget_result = state.get("context_budget_result")
+    if budget_result is None:
+        return empty_context_budget_audit_payload()
+    return budget_result.to_audit_payload()

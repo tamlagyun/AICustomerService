@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Literal, TypedDict
 
+from app.agent.context_budget import ContextBudgetResult
 from app.agent.decision import AgentDecision
 from app.agent.planner import AgentPlan
 from app.agent.trace import AgentTrace
@@ -10,6 +11,7 @@ from app.avatar_generation import AvatarGenerationResult
 from app.conversation_memory import ConversationMessage
 from app.knowledge_base import KnowledgeChunk
 from app.llm import LLMClientProtocol
+from app.llm_usage import LLMUsageSummary
 from app.map_tools import MapToolResult
 from app.player_data import PlayerDataResult
 from app.safety import SafetyDecision
@@ -37,6 +39,8 @@ class CustomerServiceState(TypedDict, total=False):
     question_type: QuestionType
     safety_decision: SafetyDecision
     llm_client: LLMClientProtocol | None
+    llm_usage_summary: LLMUsageSummary
+    context_budget_result: ContextBudgetResult
     llm_decision: AgentDecision
     map_decision: AgentDecision
     use_planner: bool

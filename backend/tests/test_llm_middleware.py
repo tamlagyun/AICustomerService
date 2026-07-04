@@ -5,11 +5,35 @@ import pytest
 from app.agent.decision import AgentAction, AgentDecision
 from app.agent.trace import AgentTrace, TraceEventType
 from app.llm import LLMResponse
+from app.llm_usage import LLMTokenUsage, LLMUsageSummary
 from app.llm_middleware import LLMCallContext, LLMClientMiddleware, wrap_llm_client
 
 
 class SuccessfulLLMClient:
     async def decide_action(self, messages: list[dict[str, str]]) -> AgentDecision:
+        return AgentDecision(action=AgentAction.DIRECT_ANSWER, reason="test")
+
+    async def generate_reply(self, messages: list[dict[str, str]]) -> LLMResponse:
+        return LLMResponse(content="ok")
+
+
+class UsageLLMClient:
+    async def decide_action(self, messages: list[dict[str, str]]) -> AgentDecision:
+        return AgentDecision(action=AgentAction.DIRECT_ANSWER, reason="test")
+
+    async def generate_reply(self, messages: list[dict[str, str]]) -> LLMResponse:
+        return LLMResponse(
+            content="ok",
+            usage=LLMTokenUsage(prompt_tokens=30, completion_tokens=10, total_tokens=40),
+        )
+
+
+class UsageDecisionLLMClient:
+    def __init__(self) -> None:
+        self.last_usage: LLMTokenUsage | None = None
+
+    async def decide_action(self, messages: list[dict[str, str]]) -> AgentDecision:
+        self.last_usage = LLMTokenUsage(prompt_tokens=50, completion_tokens=5, total_tokens=55)
         return AgentDecision(action=AgentAction.DIRECT_ANSWER, reason="test")
 
     async def generate_reply(self, messages: list[dict[str, str]]) -> LLMResponse:
@@ -63,6 +87,47 @@ async def test_llm_middleware_logs_and_reraises_failures(caplog) -> None:
         TraceEventType.LLM_FINISHED,
     ]
     assert trace.events[1].error == "TimeoutError: decision timeout"
+
+
+async def test_llm_middleware_accumulates_response_usage() -> None:
+    usage_summary = LLMUsageSummary()
+    client = LLMClientMiddleware(
+        UsageLLMClient(),
+        LLMCallContext(
+            provider="deepseek",
+            model="deepseek-chat",
+            usage_summary=usage_summary,
+            input_token_price_per_1k=0.01,
+            output_token_price_per_1k=0.02,
+        ),
+    )
+
+    await client.generate_reply([{"role": "user", "content": "你好"}])
+
+    payload = usage_summary.to_audit_payload()
+    assert payload["llm_prompt_tokens"] == 30
+    assert payload["llm_completion_tokens"] == 10
+    assert payload["llm_total_tokens"] == 40
+    assert payload["llm_estimated_cost"] == 0.0005
+
+
+async def test_llm_middleware_accumulates_decision_usage_from_wrapped_client() -> None:
+    usage_summary = LLMUsageSummary()
+    client = LLMClientMiddleware(
+        UsageDecisionLLMClient(),
+        LLMCallContext(
+            provider="deepseek",
+            model="deepseek-chat",
+            usage_summary=usage_summary,
+        ),
+    )
+
+    await client.decide_action([{"role": "user", "content": "查资料"}])
+
+    payload = usage_summary.to_audit_payload()
+    assert payload["llm_prompt_tokens"] == 50
+    assert payload["llm_completion_tokens"] == 5
+    assert payload["llm_total_tokens"] == 55
 
 
 def test_wrap_llm_client_reuses_existing_middleware_with_new_context() -> None:

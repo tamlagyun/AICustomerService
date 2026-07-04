@@ -1,5 +1,7 @@
 from app.agent.customer_service import run_customer_service_agent
 from app.agent.decision import AgentAction, AgentDecision
+from app.config import get_settings
+from app.conversation_memory import get_conversation_memory
 from tests.fakes import FakeAvatarGenerator, FakeLLMClient, FakePlayerDataTools
 
 
@@ -53,6 +55,51 @@ async def test_llm_agent_uses_decision_arguments_and_desc_for_final_analysis(mon
     final_prompt = llm_client.final_messages[-1]["content"]
     assert "根据玩家资料和 desc 字段总结玩家个性" in final_prompt
     assert "喜欢研究机制" in final_prompt
+
+
+async def test_llm_agent_truncates_long_history_but_keeps_question_and_tool_result(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("LLM_CONTEXT_MAX_TOKENS", "2400")
+    monkeypatch.setenv("LLM_CONTEXT_RESERVED_REPLY_TOKENS", "200")
+    get_settings.cache_clear()
+    session_id = "context-budget-session"
+    memory = get_conversation_memory()
+    memory.clear_session(session_id)
+    for index in range(5):
+        memory.append_message(session_id, "user", f"旧历史-{index}-" + "很长的旧对话" * 200)
+        memory.append_message(session_id, "assistant", f"旧回复-{index}-" + "很长的旧回复" * 200)
+
+    player_tools = FakePlayerDataTools()
+    monkeypatch.setattr(
+        "app.agent.customer_service.build_player_data_tools",
+        lambda: player_tools,
+    )
+    llm_client = FakeLLMClient(
+        decision=AgentDecision(
+            action=AgentAction.MYSQL_PLAYER_PROFILE,
+            reason="玩家要求查资料并总结个性",
+            arguments={"player_id": "1"},
+            final_task="根据玩家资料和 desc 字段总结玩家个性",
+        ),
+        final_reply="根据资料和个性描述，你偏好研究机制。",
+    )
+
+    try:
+        await run_customer_service_agent(
+            session_id=session_id,
+            message="根据ID=1查询我的资料并分析我的个性",
+            llm_client=llm_client,
+        )
+    finally:
+        get_settings.cache_clear()
+        memory.clear_session(session_id)
+
+    assert llm_client.final_messages is not None
+    final_prompt = llm_client.final_messages[-1]["content"]
+    assert "根据ID=1查询我的资料并分析我的个性" in final_prompt
+    assert "喜欢研究机制" in final_prompt
+    assert "旧历史" not in final_prompt
 
 
 async def test_llm_agent_asks_clarification_without_calling_mysql(monkeypatch) -> None:

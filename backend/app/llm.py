@@ -6,11 +6,13 @@ import httpx
 
 from app.agent.decision import AgentDecision, parse_agent_decision
 from app.config import get_settings
+from app.llm_usage import LLMTokenUsage, parse_llm_token_usage
 
 
 @dataclass(frozen=True)
 class LLMResponse:
     content: str
+    usage: LLMTokenUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,7 @@ class OpenAICompatibleLLMClient:
         self.api_key = api_key
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.last_usage: LLMTokenUsage | None = None
 
     async def decide_action(self, messages: list[dict[str, str]]) -> AgentDecision:
         response = await self._chat(messages)
@@ -93,7 +96,8 @@ class OpenAICompatibleLLMClient:
             payload = response.json()
 
         content = payload["choices"][0]["message"]["content"]
-        return LLMResponse(content=content)
+        self.last_usage = parse_llm_token_usage(payload.get("usage"))
+        return LLMResponse(content=content, usage=self.last_usage)
 
 
 def extract_stream_delta(line: str) -> str | None:

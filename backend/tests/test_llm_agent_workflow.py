@@ -271,6 +271,7 @@ async def test_agent_emits_status_when_llm_decision_fails_then_uses_local_player
     caplog,
 ) -> None:
     caplog.set_level(logging.ERROR, logger="app.agent.customer_service")
+    caplog.set_level(logging.ERROR, logger="app.llm_middleware")
     player_tools = FakePlayerDataTools()
     monkeypatch.setattr(
         "app.agent.customer_service.build_player_data_tools",
@@ -290,6 +291,10 @@ async def test_agent_emits_status_when_llm_decision_fails_then_uses_local_player
         statuses.append(status_queue.get_nowait())
 
     assert any("大模型决策失败" in status for status in statuses)
+    assert (
+        "LLM call failed; operation=decide_action provider=injected model=unknown "
+        "session_id=session-1"
+    ) in caplog.text
     assert "LLM decision failed" in caplog.text
     assert "TimeoutError" in caplog.text
     assert player_tools.requested_limit == 100

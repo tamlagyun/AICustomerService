@@ -38,6 +38,7 @@ from app.config import get_settings
 from app.conversation_memory import get_conversation_memory
 from app.knowledge_base import KnowledgeBaseSearch
 from app.llm import LLMClientProtocol, build_llm_client
+from app.llm_middleware import LLMCallContext, wrap_llm_client
 from app.map_tools import MapToolResult, MapToolStatus
 from app.player_data import PlayerDataResult, PlayerDataStatus, build_player_data_tools
 from app.prompt_registry import PromptNotFoundError
@@ -227,7 +228,18 @@ async def run_customer_service_agent(
         )
         return response
 
-    selected_llm_client = llm_client if llm_client is not None else build_llm_client(model_provider)
+    agent_trace = AgentTrace()
+    base_llm_client = llm_client if llm_client is not None else build_llm_client(model_provider)
+    selected_llm_client = _wrap_request_llm_client(
+        base_llm_client,
+        session_id=session_id,
+        provider_name=_llm_context_provider(
+            settings,
+            requested_provider=model_provider,
+            injected=llm_client is not None,
+        ),
+        agent_trace=agent_trace,
+    )
     if selected_llm_client is not None:
         log_prompt_versions(session_id, settings)
 
@@ -241,7 +253,7 @@ async def run_customer_service_agent(
             "conversation_history": memory.get_recent_messages(session_id),
             "llm_client": selected_llm_client,
             "status_queue": status_queue,
-            "agent_trace": AgentTrace(),
+            "agent_trace": agent_trace,
         }
     )
     response = ChatResponse(
@@ -1061,6 +1073,49 @@ def _tool_execution_context(state: CustomerServiceState) -> ToolExecutionContext
         enforce_dependencies=False,
         agent_trace=state.get("agent_trace"),
     )
+
+
+def _wrap_request_llm_client(
+    client: LLMClientProtocol | None,
+    *,
+    session_id: str,
+    provider_name: str,
+    agent_trace: AgentTrace,
+) -> LLMClientProtocol | None:
+    if client is None:
+        return None
+    return wrap_llm_client(
+        client,
+        LLMCallContext(
+            provider=provider_name,
+            model=_llm_context_model(client),
+            session_id=session_id,
+            agent_trace=agent_trace,
+        ),
+    )
+
+
+def _llm_context_provider(settings, *, requested_provider: str | None, injected: bool) -> str:
+    if injected:
+        return "injected"
+    return (
+        requested_provider
+        or settings.llm_default_provider
+        or settings.llm_provider
+        or "unknown"
+    ).strip().lower()
+
+
+def _llm_context_model(client: LLMClientProtocol) -> str:
+    model = getattr(client, "model", "")
+    if isinstance(model, str) and model:
+        return model
+    wrapped = getattr(client, "wrapped", None)
+    if wrapped is not None:
+        nested_model = getattr(wrapped, "model", "")
+        if isinstance(nested_model, str) and nested_model:
+            return nested_model
+    return ""
 
 
 def _player_profile_decision_for_tool_call(state: CustomerServiceState) -> AgentDecision:

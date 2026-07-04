@@ -1,4 +1,7 @@
 from app.tools.registry import (
+    ToolArgumentDefinition,
+    ToolArgumentsValidationResult,
+    ToolArgumentType,
     ToolCategory,
     ToolDefinition,
     ToolDependency,
@@ -8,9 +11,13 @@ from app.tools.registry import (
     is_registered_tool_action,
     list_tool_definitions,
     missing_tool_dependencies,
+    validate_tool_arguments,
 )
 
 __all__ = [
+    "ToolArgumentDefinition",
+    "ToolArgumentsValidationResult",
+    "ToolArgumentType",
     "ToolCategory",
     "ToolDefinition",
     "ToolDependency",
@@ -20,4 +27,5 @@ __all__ = [
     "is_registered_tool_action",
     "list_tool_definitions",
     "missing_tool_dependencies",
+    "validate_tool_arguments",
 ]

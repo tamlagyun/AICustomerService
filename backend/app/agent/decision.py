@@ -46,10 +46,18 @@ def parse_agent_decision(raw_content: str) -> AgentDecision:
             reason=f"不支持的模型动作：{raw_action}",
         )
 
+    arguments = _parse_arguments(payload.get("arguments"))
+    validation = _validate_arguments(action, arguments)
+    if not validation.valid:
+        return AgentDecision(
+            action=AgentAction.FALLBACK,
+            reason=f"工具参数不合法：{'; '.join(validation.errors)}",
+        )
+
     return AgentDecision(
         action=action,
         reason=str(payload.get("reason", "")),
-        arguments=_parse_arguments(payload.get("arguments")),
+        arguments=validation.arguments,
         final_task=str(payload.get("final_task", "")),
         direct_reply=str(payload.get("direct_reply", "")),
     )
@@ -59,3 +67,9 @@ def _parse_arguments(raw_arguments: object) -> dict[str, object]:
     if isinstance(raw_arguments, dict):
         return raw_arguments
     return {}
+
+
+def _validate_arguments(action: AgentAction, arguments: dict[str, object]):
+    from app.tools.registry import validate_tool_arguments
+
+    return validate_tool_arguments(action, arguments)

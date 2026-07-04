@@ -1,5 +1,6 @@
 from app.agent.decision import AgentAction
 from app.config import Settings
+from app.tools import registry
 from app.tools.registry import (
     ToolCategory,
     ToolDependency,
@@ -57,3 +58,60 @@ def test_missing_tool_dependencies_follow_settings() -> None:
     assert missing_tool_dependencies(enabled_settings, "mysql_players_list") == []
     assert missing_tool_dependencies(enabled_settings, AgentAction.AMAP_WEATHER) == []
     assert missing_tool_dependencies(enabled_settings, "unknown") == []
+
+
+def test_validate_tool_arguments_applies_default_limit() -> None:
+    result = registry.validate_tool_arguments(AgentAction.MYSQL_PLAYERS_LIST, {})
+
+    assert result.valid is True
+    assert result.arguments == {"limit": 100}
+    assert result.errors == []
+
+
+def test_validate_tool_arguments_coerces_and_clamps_limit() -> None:
+    result = registry.validate_tool_arguments(AgentAction.MYSQL_PLAYERS_LIST, {"limit": "1200"})
+
+    assert result.valid is True
+    assert result.arguments == {"limit": 1000}
+    assert result.errors == []
+
+
+def test_validate_tool_arguments_rejects_invalid_enum_value() -> None:
+    result = registry.validate_tool_arguments(
+        AgentAction.AMAP_ROUTE,
+        {
+            "origin": "广州塔",
+            "destination": "白云山",
+            "mode": "spaceship",
+        },
+    )
+
+    assert result.valid is False
+    assert result.arguments == {
+        "origin": "广州塔",
+        "destination": "白云山",
+    }
+    assert result.errors == ["mode must be one of: bicycling, driving, transit, walking"]
+
+
+def test_validate_tool_arguments_ignores_unknown_arguments() -> None:
+    result = registry.validate_tool_arguments(
+        AgentAction.AMAP_WEATHER,
+        {
+            "city": "北京",
+            "sql": "drop table players",
+        },
+    )
+
+    assert result.valid is True
+    assert result.arguments == {"city": "北京"}
+    assert result.errors == []
+
+
+def test_validate_tool_arguments_skips_control_actions() -> None:
+    sentinel = object()
+    result = registry.validate_tool_arguments(AgentAction.DIRECT_ANSWER, {"unused": sentinel})
+
+    assert result.valid is True
+    assert result.arguments == {"unused": sentinel}
+    assert result.errors == []

@@ -62,10 +62,17 @@ def _parse_step(raw_step: object) -> PlanStep:
     except ValueError as exc:
         raise PlanParseError(f"Unsupported planner action: {raw_action}") from exc
 
+    arguments = _parse_arguments(raw_step.get("arguments"))
+    validation = _validate_arguments(action, arguments)
+    if not validation.valid:
+        raise PlanParseError(
+            f"Invalid planner arguments for {action}: {'; '.join(validation.errors)}"
+        )
+
     return PlanStep(
         action=action,
         reason=str(raw_step.get("reason", "")),
-        arguments=_parse_arguments(raw_step.get("arguments")),
+        arguments=validation.arguments,
         final_task=str(raw_step.get("final_task", "")),
         direct_reply=str(raw_step.get("direct_reply", "")),
     )
@@ -79,3 +86,9 @@ def _parse_arguments(raw_arguments: object) -> dict[str, object]:
 
 def _is_jsonish(value: object) -> bool:
     return value is None or isinstance(value, str | int | float | bool | list | dict)
+
+
+def _validate_arguments(action: AgentAction, arguments: dict[str, object]):
+    from app.tools.registry import validate_tool_arguments
+
+    return validate_tool_arguments(action, arguments)

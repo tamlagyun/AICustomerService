@@ -34,6 +34,45 @@ def test_parse_agent_plan_reads_ordered_steps() -> None:
     assert plan.steps[1].arguments == {"keywords": "attractions", "city": "Guangzhou"}
 
 
+def test_parse_agent_plan_validates_step_arguments() -> None:
+    plan = parse_agent_plan(
+        """
+        {
+          "steps": [
+            {
+              "action": "mysql_players_list",
+              "reason": "need all players",
+              "arguments": {"limit": "1500"}
+            }
+          ]
+        }
+        """
+    )
+
+    assert plan.steps[0].arguments == {"limit": 1000}
+
+
+def test_parse_agent_plan_rejects_invalid_step_arguments() -> None:
+    with pytest.raises(PlanParseError, match="Invalid planner arguments"):
+        parse_agent_plan(
+            """
+            {
+              "steps": [
+                {
+                  "action": "amap_route",
+                  "reason": "bad route mode",
+                  "arguments": {
+                    "origin": "广州塔",
+                    "destination": "白云山",
+                    "mode": "spaceship"
+                  }
+                }
+              ]
+            }
+            """
+        )
+
+
 def test_parse_agent_plan_rejects_unknown_action() -> None:
     with pytest.raises(PlanParseError, match="Unsupported planner action"):
         parse_agent_plan('{"steps":[{"action":"write_sql","reason":"bad"}]}')

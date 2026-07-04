@@ -45,6 +45,36 @@ def test_parse_agent_decision_accepts_players_list_action() -> None:
     assert decision.final_task == "总结玩家列表整体情况"
 
 
+def test_parse_agent_decision_defaults_players_list_limit() -> None:
+    decision = parse_agent_decision(
+        '{"action":"mysql_players_list","reason":"用户要查询所有玩家"}'
+    )
+
+    assert decision.action == AgentAction.MYSQL_PLAYERS_LIST
+    assert decision.arguments == {"limit": 100}
+
+
+def test_parse_agent_decision_clamps_players_list_limit() -> None:
+    decision = parse_agent_decision(
+        '{"action":"mysql_players_list","reason":"用户要查询所有玩家","arguments":{"limit":"2000"}}'
+    )
+
+    assert decision.action == AgentAction.MYSQL_PLAYERS_LIST
+    assert decision.arguments == {"limit": 1000}
+
+
+def test_parse_agent_decision_rejects_invalid_tool_arguments() -> None:
+    decision = parse_agent_decision(
+        (
+            '{"action":"amap_navigation","reason":"玩家要求打开导航",'
+            '"arguments":{"destination":"天安门","mode":"spaceship"}}'
+        )
+    )
+
+    assert decision.action == AgentAction.FALLBACK
+    assert "工具参数不合法" in decision.reason
+
+
 def test_parse_agent_decision_accepts_avatar_generate_action() -> None:
     decision = parse_agent_decision(
         (

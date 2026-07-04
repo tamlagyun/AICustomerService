@@ -19,6 +19,30 @@ class ToolDependency(StrEnum):
     AMAP = "amap"
 
 
+class ToolArgumentType(StrEnum):
+    STR = "str"
+    INT = "int"
+    DICT = "dict"
+
+
+@dataclass(frozen=True)
+class ToolArgumentDefinition:
+    name: str
+    argument_type: ToolArgumentType
+    required: bool = False
+    default: object | None = None
+    min_value: int | None = None
+    max_value: int | None = None
+    choices: tuple[object, ...] = ()
+
+
+@dataclass(frozen=True)
+class ToolArgumentsValidationResult:
+    valid: bool
+    arguments: dict[str, object]
+    errors: list[str]
+
+
 @dataclass(frozen=True)
 class ToolDefinition:
     name: str
@@ -28,6 +52,7 @@ class ToolDefinition:
     dependencies: tuple[ToolDependency, ...] = ()
     backend_entrypoint: str = ""
     external_tool_name: str = ""
+    arguments_schema: tuple[ToolArgumentDefinition, ...] = ()
 
 
 TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
@@ -45,6 +70,9 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         description="按玩家 ID 查询 players 表中的单个玩家资料。",
         dependencies=(ToolDependency.MYSQL,),
         backend_entrypoint="app.player_data.PlayerDataTools.get_player_profile",
+        arguments_schema=(
+            ToolArgumentDefinition("player_id", ToolArgumentType.STR, required=True),
+        ),
     ),
     ToolDefinition(
         name="mysql_players_list",
@@ -53,6 +81,15 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         description="查询 players 表玩家列表，默认 limit=100，最大 limit=1000。",
         dependencies=(ToolDependency.MYSQL,),
         backend_entrypoint="app.player_data.PlayerDataTools.get_players",
+        arguments_schema=(
+            ToolArgumentDefinition(
+                "limit",
+                ToolArgumentType.INT,
+                default=100,
+                min_value=1,
+                max_value=1000,
+            ),
+        ),
     ),
     ToolDefinition(
         name="avatar_generate",
@@ -61,6 +98,9 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         description="根据已查询到的玩家资料生成本地 PNG 个性头像。",
         dependencies=(ToolDependency.MYSQL,),
         backend_entrypoint="app.avatar_generation.AvatarGenerator.generate_player_avatar",
+        arguments_schema=(
+            ToolArgumentDefinition("player_id", ToolArgumentType.STR, required=True),
+        ),
     ),
     ToolDefinition(
         name="amap_place_search",
@@ -70,6 +110,12 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         dependencies=(ToolDependency.AMAP,),
         backend_entrypoint="app.map_tools.AmapMapTools.search_place",
         external_tool_name="maps_text_search",
+        arguments_schema=(
+            ToolArgumentDefinition("keywords", ToolArgumentType.STR),
+            ToolArgumentDefinition("city", ToolArgumentType.STR),
+            ToolArgumentDefinition("types", ToolArgumentType.STR),
+            ToolArgumentDefinition("presentation", ToolArgumentType.DICT),
+        ),
     ),
     ToolDefinition(
         name="amap_geo",
@@ -79,6 +125,10 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         dependencies=(ToolDependency.AMAP,),
         backend_entrypoint="app.map_tools.AmapMapTools.geocode",
         external_tool_name="maps_geo",
+        arguments_schema=(
+            ToolArgumentDefinition("address", ToolArgumentType.STR, required=True),
+            ToolArgumentDefinition("city", ToolArgumentType.STR),
+        ),
     ),
     ToolDefinition(
         name="amap_route",
@@ -88,6 +138,17 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         dependencies=(ToolDependency.AMAP,),
         backend_entrypoint="app.map_tools.AmapMapTools.route",
         external_tool_name="maps_direction_*",
+        arguments_schema=(
+            ToolArgumentDefinition("origin", ToolArgumentType.STR, required=True),
+            ToolArgumentDefinition("destination", ToolArgumentType.STR, required=True),
+            ToolArgumentDefinition(
+                "mode",
+                ToolArgumentType.STR,
+                choices=("bicycling", "driving", "transit", "walking"),
+            ),
+            ToolArgumentDefinition("city", ToolArgumentType.STR),
+            ToolArgumentDefinition("cityd", ToolArgumentType.STR),
+        ),
     ),
     ToolDefinition(
         name="amap_navigation",
@@ -97,6 +158,18 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         dependencies=(ToolDependency.AMAP,),
         backend_entrypoint="app.map_tools.AmapMapTools.navigation",
         external_tool_name="amap_navigation_uri",
+        arguments_schema=(
+            ToolArgumentDefinition("destination", ToolArgumentType.STR, required=True),
+            ToolArgumentDefinition("destination_name", ToolArgumentType.STR),
+            ToolArgumentDefinition("origin", ToolArgumentType.STR),
+            ToolArgumentDefinition("origin_name", ToolArgumentType.STR),
+            ToolArgumentDefinition(
+                "mode",
+                ToolArgumentType.STR,
+                choices=("bicycling", "driving", "transit", "walking"),
+            ),
+            ToolArgumentDefinition("city", ToolArgumentType.STR),
+        ),
     ),
     ToolDefinition(
         name="amap_weather",
@@ -106,6 +179,9 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         dependencies=(ToolDependency.AMAP,),
         backend_entrypoint="app.map_tools.AmapMapTools.weather",
         external_tool_name="maps_weather",
+        arguments_schema=(
+            ToolArgumentDefinition("city", ToolArgumentType.STR, required=True),
+        ),
     ),
 )
 
@@ -151,9 +227,103 @@ def missing_tool_dependencies(
     return missing
 
 
+def validate_tool_arguments(
+    action: AgentAction,
+    arguments: dict[str, object] | None,
+) -> ToolArgumentsValidationResult:
+    raw_arguments = arguments if isinstance(arguments, dict) else {}
+    definition = get_tool_by_action(action)
+    if definition is None:
+        return ToolArgumentsValidationResult(
+            valid=True,
+            arguments=raw_arguments,
+            errors=[],
+        )
+
+    cleaned_arguments: dict[str, object] = {}
+    errors: list[str] = []
+    for argument_definition in definition.arguments_schema:
+        if argument_definition.name not in raw_arguments:
+            if argument_definition.default is not None:
+                cleaned_arguments[argument_definition.name] = argument_definition.default
+            elif argument_definition.required:
+                errors.append(f"{argument_definition.name} is required")
+            continue
+
+        raw_value = raw_arguments[argument_definition.name]
+        parsed_value, error = _coerce_argument(argument_definition, raw_value)
+        if error:
+            errors.append(error)
+            continue
+        if parsed_value is None:
+            if argument_definition.default is not None:
+                cleaned_arguments[argument_definition.name] = argument_definition.default
+            elif argument_definition.required:
+                errors.append(f"{argument_definition.name} is required")
+            continue
+
+        if argument_definition.choices and parsed_value not in argument_definition.choices:
+            choices = ", ".join(str(choice) for choice in sorted(argument_definition.choices))
+            errors.append(f"{argument_definition.name} must be one of: {choices}")
+            continue
+
+        cleaned_arguments[argument_definition.name] = _clamp_numeric_argument(
+            argument_definition,
+            parsed_value,
+        )
+
+    return ToolArgumentsValidationResult(
+        valid=not errors,
+        arguments=cleaned_arguments,
+        errors=errors,
+    )
+
+
 def _coerce_tool_definition(tool: ToolDefinition | AgentAction | str) -> ToolDefinition | None:
     if isinstance(tool, ToolDefinition):
         return tool
     if isinstance(tool, AgentAction):
         return get_tool_by_action(tool)
     return get_tool_by_name(tool)
+
+
+def _coerce_argument(
+    definition: ToolArgumentDefinition,
+    value: object,
+) -> tuple[object | None, str | None]:
+    if definition.argument_type == ToolArgumentType.STR:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return (cleaned, None) if cleaned else (None, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value), None
+        return None, f"{definition.name} must be a string"
+
+    if definition.argument_type == ToolArgumentType.INT:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value, None
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned.isdigit():
+                return int(cleaned), None
+        return None, f"{definition.name} must be an integer"
+
+    if definition.argument_type == ToolArgumentType.DICT:
+        if isinstance(value, dict):
+            return value, None
+        return None, f"{definition.name} must be an object"
+
+    return None, f"{definition.name} has unsupported argument type"
+
+
+def _clamp_numeric_argument(
+    definition: ToolArgumentDefinition,
+    value: object,
+) -> object:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return value
+    if definition.min_value is not None and value < definition.min_value:
+        return definition.min_value
+    if definition.max_value is not None and value > definition.max_value:
+        return definition.max_value
+    return value

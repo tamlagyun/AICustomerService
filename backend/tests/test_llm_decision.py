@@ -1,3 +1,5 @@
+import logging
+
 from app.agent.decision import AgentAction, AgentDecision, parse_agent_decision
 
 
@@ -130,6 +132,33 @@ def test_parse_agent_decision_falls_back_on_invalid_json() -> None:
 
     assert decision.action == AgentAction.FALLBACK
     assert "无法解析" in decision.reason
+
+
+def test_parse_agent_decision_repairs_markdown_json_block(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.structured_output_repair")
+
+    decision = parse_agent_decision(
+        """
+        下面是决策：
+        ```json
+        {"action":"amap_weather","reason":"查询天气","arguments":{"city":"北京"}}
+        ```
+        """
+    )
+
+    assert decision.action == AgentAction.AMAP_WEATHER
+    assert decision.arguments == {"city": "北京"}
+    assert "Structured output repaired; parser=agent_decision" in caplog.text
+    assert "下面是决策" not in caplog.text
+
+
+def test_parse_agent_decision_repairs_single_quotes_and_trailing_commas() -> None:
+    decision = parse_agent_decision(
+        "{'action':'mysql_players_list','reason':'查询全部玩家','arguments':{'limit':100,},}"
+    )
+
+    assert decision.action == AgentAction.MYSQL_PLAYERS_LIST
+    assert decision.arguments == {"limit": 100}
 
 
 def test_parse_agent_decision_rejects_unknown_action() -> None:

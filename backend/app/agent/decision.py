@@ -1,6 +1,11 @@
 from dataclasses import dataclass
 from enum import StrEnum
 import json
+import logging
+
+from app.structured_output_repair import repair_structured_json
+
+logger = logging.getLogger("app.structured_output_repair")
 
 
 class AgentAction(StrEnum):
@@ -29,8 +34,21 @@ class AgentDecision:
 
 
 def parse_agent_decision(raw_content: str) -> AgentDecision:
+    repair_result = repair_structured_json(raw_content)
+    if not repair_result.success:
+        logger.warning(
+            "Structured output repair failed; parser=agent_decision reason=%s",
+            repair_result.reason,
+        )
+        return AgentDecision(
+            action=AgentAction.FALLBACK,
+            reason="无法解析模型 JSON 决策。",
+        )
+    if repair_result.repaired:
+        logger.info("Structured output repaired; parser=agent_decision")
+
     try:
-        payload = json.loads(raw_content)
+        payload = json.loads(repair_result.content)
     except json.JSONDecodeError:
         return AgentDecision(
             action=AgentAction.FALLBACK,

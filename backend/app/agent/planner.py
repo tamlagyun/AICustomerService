@@ -1,7 +1,11 @@
 from dataclasses import dataclass
 import json
+import logging
 
 from app.agent.decision import AgentAction, AgentDecision
+from app.structured_output_repair import repair_structured_json
+
+logger = logging.getLogger("app.structured_output_repair")
 
 
 class PlanParseError(ValueError):
@@ -36,8 +40,18 @@ class AgentPlan:
 
 
 def parse_agent_plan(raw_content: str) -> AgentPlan:
+    repair_result = repair_structured_json(raw_content)
+    if not repair_result.success:
+        logger.warning(
+            "Structured output repair failed; parser=agent_plan reason=%s",
+            repair_result.reason,
+        )
+        raise PlanParseError("Planner output is not valid JSON")
+    if repair_result.repaired:
+        logger.info("Structured output repaired; parser=agent_plan")
+
     try:
-        payload = json.loads(raw_content)
+        payload = json.loads(repair_result.content)
     except json.JSONDecodeError as exc:
         raise PlanParseError("Planner output is not valid JSON") from exc
 

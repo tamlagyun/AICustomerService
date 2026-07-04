@@ -52,6 +52,37 @@ def test_parse_agent_plan_validates_step_arguments() -> None:
     assert plan.steps[0].arguments == {"limit": 1000}
 
 
+def test_parse_agent_plan_repairs_markdown_json_block() -> None:
+    plan = parse_agent_plan(
+        """
+        计划如下：
+        ```json
+        {
+          "steps": [
+            {
+              "action": "mysql_player_profile",
+              "reason": "need player profile",
+              "arguments": {"player_id": "1"}
+            }
+          ]
+        }
+        ```
+        """
+    )
+
+    assert plan.steps[0].action == AgentAction.MYSQL_PLAYER_PROFILE
+    assert plan.steps[0].arguments == {"player_id": "1"}
+
+
+def test_parse_agent_plan_repairs_single_quotes_and_trailing_commas() -> None:
+    plan = parse_agent_plan(
+        "{'steps':[{'action':'amap_weather','reason':'weather','arguments':{'city':'北京',},},],}"
+    )
+
+    assert plan.steps[0].action == AgentAction.AMAP_WEATHER
+    assert plan.steps[0].arguments == {"city": "北京"}
+
+
 def test_parse_agent_plan_rejects_invalid_step_arguments() -> None:
     with pytest.raises(PlanParseError, match="Invalid planner arguments"):
         parse_agent_plan(

@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     log_max_bytes: int = 5_242_880
     log_backup_count: int = 5
     agent_audit_log_enabled: bool = True
+    agent_checkpoint_enabled: bool = False
+    agent_checkpoint_file: str = "agent_checkpoints.jsonl"
     agent_eval_enabled: bool = False
 
     model_config = SettingsConfigDict(env_file="../.env", env_file_encoding="utf-8", extra="ignore")

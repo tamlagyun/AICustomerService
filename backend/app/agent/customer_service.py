@@ -6,6 +6,7 @@ from typing import Any, AsyncIterator, Literal
 from langgraph.graph import END, StateGraph
 
 from app.agent.audit import write_chat_audit_event
+from app.agent.checkpoint import write_chat_checkpoint_event
 from app.agent.context_budget import ContextBudget, apply_context_budget
 from app.agent.decision import AgentAction, AgentDecision
 from app.agent.map_agent import MapAgentResult, run_map_agent
@@ -228,6 +229,13 @@ async def run_customer_service_agent(
             message=message,
             response=response,
         )
+        _write_chat_checkpoint_safely(
+            settings,
+            session_id=session_id,
+            player_id=player_id,
+            message=message,
+            response=response,
+        )
         return response
 
     agent_trace = AgentTrace()
@@ -271,6 +279,14 @@ async def run_customer_service_agent(
     )
     _record_conversation_exchange(session_id, message, response.reply)
     write_chat_audit_event(
+        settings,
+        session_id=session_id,
+        player_id=player_id,
+        message=message,
+        response=response,
+        final_state=final_state,
+    )
+    _write_chat_checkpoint_safely(
         settings,
         session_id=session_id,
         player_id=player_id,
@@ -1094,6 +1110,28 @@ def _record_conversation_exchange(session_id: str, user_message: str, assistant_
     memory = get_conversation_memory()
     memory.append_message(session_id, "user", user_message)
     memory.append_message(session_id, "assistant", assistant_reply)
+
+
+def _write_chat_checkpoint_safely(
+    settings: Settings,
+    *,
+    session_id: str,
+    player_id: str | None,
+    message: str,
+    response: ChatResponse,
+    final_state: CustomerServiceState | None = None,
+) -> None:
+    try:
+        write_chat_checkpoint_event(
+            settings,
+            session_id=session_id,
+            player_id=player_id,
+            message=message,
+            response=response,
+            final_state=final_state,
+        )
+    except Exception:
+        logger.exception("Agent checkpoint writing failed; session_id=%s", session_id)
 
 
 @lru_cache

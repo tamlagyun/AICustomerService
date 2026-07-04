@@ -3,6 +3,8 @@ import { useState } from "react";
 import {
   EvaluationRunResponse,
   EvaluationTool,
+  KnowledgeVectorHealthResponse,
+  checkKnowledgeVectorHealth,
   rebuildKnowledgeVectorIndex,
 } from "../api/chat";
 
@@ -15,8 +17,11 @@ type EvaluationViewProps = {
 
 export function EvaluationView({ isEvaluating, result, error, onRun }: EvaluationViewProps) {
   const [isRebuilding, setIsRebuilding] = useState(false);
+  const [isCheckingHealth, setIsCheckingHealth] = useState(false);
   const [rebuildMessage, setRebuildMessage] = useState<string | null>(null);
   const [rebuildError, setRebuildError] = useState<string | null>(null);
+  const [vectorHealth, setVectorHealth] = useState<KnowledgeVectorHealthResponse | null>(null);
+  const [vectorHealthError, setVectorHealthError] = useState<string | null>(null);
 
   async function handleRebuildVectorIndex() {
     if (isRebuilding) {
@@ -40,6 +45,23 @@ export function EvaluationView({ isEvaluating, result, error, onRun }: Evaluatio
     }
   }
 
+  async function handleCheckVectorHealth() {
+    if (isCheckingHealth) {
+      return;
+    }
+
+    setVectorHealth(null);
+    setVectorHealthError(null);
+    setIsCheckingHealth(true);
+    try {
+      setVectorHealth(await checkKnowledgeVectorHealth());
+    } catch {
+      setVectorHealthError("检查向量库状态失败，请确认后端服务已启动。");
+    } finally {
+      setIsCheckingHealth(false);
+    }
+  }
+
   return (
     <section className="evaluation-view" aria-label="Agent 评测">
       <div className="evaluation-toolbar">
@@ -48,6 +70,9 @@ export function EvaluationView({ isEvaluating, result, error, onRun }: Evaluatio
           <p>调用当前模型和已启用工具运行内置用例，评测接口默认关闭。</p>
         </div>
         <div className="evaluation-actions">
+          <button type="button" onClick={handleCheckVectorHealth} disabled={isCheckingHealth}>
+            {isCheckingHealth ? "检查中" : "检查向量库状态"}
+          </button>
           <button type="button" onClick={handleRebuildVectorIndex} disabled={isRebuilding}>
             {isRebuilding ? "重建中" : "重建知识库向量库"}
           </button>
@@ -59,6 +84,23 @@ export function EvaluationView({ isEvaluating, result, error, onRun }: Evaluatio
 
       {rebuildMessage ? <p className="evaluation-info">{rebuildMessage}</p> : null}
       {rebuildError ? <p className="error-message evaluation-error">{rebuildError}</p> : null}
+      {vectorHealth ? (
+        <div className={`vector-health ${vectorHealth.status}`}>
+          <strong>状态：{vectorHealth.status}</strong>
+          <span>{vectorHealth.message}</span>
+          <span>文档数：{vectorHealth.document_count}</span>
+          <span>collection：{vectorHealth.collection_name}</span>
+          {vectorHealth.metadata ? (
+            <span>
+              文件数：{vectorHealth.metadata.file_count}，模型：
+              {vectorHealth.metadata.embedding_model}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+      {vectorHealthError ? (
+        <p className="error-message evaluation-error">{vectorHealthError}</p>
+      ) : null}
       {error ? <p className="error-message evaluation-error">{error}</p> : null}
 
       {result ? (

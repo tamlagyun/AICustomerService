@@ -239,6 +239,8 @@ AGENT_EVAL_ENABLED=true
 ```text
 GET  /api/evaluations/cases
 POST /api/evaluations/run
+GET  /api/knowledge-base/vector-health
+POST /api/knowledge-base/vector-index/rebuild
 ```
 
 `POST /api/evaluations/run` 支持传入 `model_provider` 和 `use_planner`。依赖 MySQL 或高德地图的用例在对应配置未启用时会返回 `skipped`，不计为失败。
@@ -253,6 +255,8 @@ LOG_LEVEL=INFO
 LOG_MAX_BYTES=5242880
 LOG_BACKUP_COUNT=5
 AGENT_AUDIT_LOG_ENABLED=true
+AGENT_CHECKPOINT_ENABLED=false
+AGENT_CHECKPOINT_FILE=agent_checkpoints.jsonl
 ```
 
 默认日志文件：
@@ -260,9 +264,12 @@ AGENT_AUDIT_LOG_ENABLED=true
 ```text
 logs/app.log           后端运行日志、异常日志、大模型失败日志
 logs/agent_audit.jsonl Agent 审计日志，一行一个 JSON
+logs/agent_checkpoints.jsonl Agent checkpoint，一行一个 JSON，默认关闭
 ```
 
 `agent_audit.jsonl` 会记录每次聊天完成后的关键信息，包括 `session_id`、`player_id`、玩家问题、最终回复、是否转人工、来源、表格摘要、模型动作和工具调用摘要。该文件用于排查 Agent 决策链路，不建议提交到仓库。
+
+启用 `AGENT_CHECKPOINT_ENABLED=true` 后，后端会在每轮聊天完成时保存 checkpoint，包含模型动作、Planner 步骤、工具摘要、Trace 摘要、上下文预算和 token 统计。可通过 `GET /api/checkpoints?session_id=xxx` 查询指定会话的最近 checkpoint。
 
 启用后流程：
 

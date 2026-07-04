@@ -309,6 +309,38 @@ describe("App", () => {
     expect(await screen.findByText("已重建 2 个知识片段。")).toBeInTheDocument();
   });
 
+  it("checks the knowledge vector health from the evaluation view", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          status: "ready",
+          message: "向量库可用。",
+          collection_name: "customer_service_knowledge",
+          document_count: 2,
+          metadata: {
+            file_count: 1,
+            file_hash: "abc",
+            indexed_at: "2026-07-04T00:00:00+00:00",
+            embedding_provider: "ollama",
+            embedding_model: "bge-m3",
+            collection_name: "customer_service_knowledge",
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /Agent 评测/ }));
+    await user.click(screen.getByRole("button", { name: "检查向量库状态" }));
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-base/vector-health");
+    expect(await screen.findByText("状态：ready")).toBeInTheDocument();
+    expect(screen.getByText("文档数：2")).toBeInTheDocument();
+    expect(screen.getByText("collection：customer_service_knowledge")).toBeInTheDocument();
+  });
+
   it("scrolls to the latest message while streaming updates arrive", async () => {
     const encoder = new TextEncoder();
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(

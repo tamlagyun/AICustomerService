@@ -1,17 +1,19 @@
 import json
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.agent import run_customer_service_agent, stream_customer_service_agent
+from app.agent.checkpoint import CheckpointStore
 from app.config import get_settings
 from app.evaluations import EvaluationRunRequest, ensure_evaluation_enabled, list_evaluation_cases
 from app.evaluations import run_evaluation_suite
 from app.logging_config import configure_logging
 from app.rag.chroma_store import rebuild_knowledge_vector_index
+from app.rag.vector_health import get_vector_store_health_payload
 from app.schemas import ChatRequest, ChatResponse
 
 settings = get_settings()
@@ -87,6 +89,22 @@ async def evaluation_run(request: EvaluationRunRequest) -> dict:
 @app.post("/api/knowledge-base/vector-index/rebuild")
 async def knowledge_vector_index_rebuild() -> dict:
     return rebuild_knowledge_vector_index()
+
+
+@app.get("/api/knowledge-base/vector-health")
+async def knowledge_vector_health() -> dict:
+    return get_vector_store_health_payload(get_settings())
+
+
+@app.get("/api/checkpoints")
+async def checkpoints(session_id: str | None = None, limit: int = 20) -> dict:
+    current_settings = get_settings()
+    if not current_settings.agent_checkpoint_enabled:
+        raise HTTPException(status_code=403, detail="Agent checkpoint API is disabled")
+    store = CheckpointStore(current_settings)
+    return {
+        "checkpoints": store.list_recent(session_id=session_id, limit=limit),
+    }
 
 
 def _format_sse(event: str, data: dict) -> str:

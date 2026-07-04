@@ -23,11 +23,13 @@ class FakeChromaStore:
         self.rebuilt_chunks = []
         self.rebuilt_embeddings: list[list[float]] = []
         self.rebuilt_embedding_model = ""
+        self.rebuilt_index_metadata = {}
 
-    def rebuild(self, *, chunks, embeddings, embedding_model: str):
+    def rebuild(self, *, chunks, embeddings, embedding_model: str, index_metadata=None):
         self.rebuilt_chunks = chunks
         self.rebuilt_embeddings = embeddings
         self.rebuilt_embedding_model = embedding_model
+        self.rebuilt_index_metadata = index_metadata or {}
 
 
 def test_vector_search_finds_semantically_similar_recharge_question(tmp_path: Path) -> None:
@@ -74,6 +76,8 @@ def test_knowledge_vector_indexer_rebuilds_chroma_from_knowledge_chunks(
         "充值未到账怎么办\n请提供订单号、充值时间、服务器和角色 ID。"
     ]
     assert chroma_store.rebuilt_embedding_model == "bge-m3"
+    assert chroma_store.rebuilt_index_metadata["embedding_model"] == "bge-m3"
+    assert chroma_store.rebuilt_index_metadata["file_count"] == 1
     assert chroma_store.rebuilt_embeddings == [[1.0, 0.5]]
     assert chroma_store.rebuilt_chunks[0].reference == "recharge.md#充值未到账怎么办"
 

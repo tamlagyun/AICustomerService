@@ -97,6 +97,7 @@ class ChromaKnowledgeStore:
         chunks: list[VectorChunk],
         embeddings: list[list[float]],
         embedding_model: str,
+        index_metadata: dict[str, str | int] | None = None,
     ) -> None:
         if len(chunks) != len(embeddings):
             raise ValueError("chunks and embeddings length mismatch")
@@ -108,7 +109,7 @@ class ChromaKnowledgeStore:
             collection = client.create_collection(
                 name=self.collection_name,
                 embedding_function=None,
-                metadata={"embedding_model": embedding_model},
+                metadata=index_metadata or {"embedding_model": embedding_model},
             )
             if not chunks:
                 return
@@ -181,6 +182,14 @@ class ChromaKnowledgeStore:
         except Exception as exc:
             raise ChromaIndexNotReady("向量知识库尚未建立") from exc
 
+    def existing_collection(self):
+        client = self._client()
+        try:
+            return self._existing_collection(client)
+        except Exception:
+            _close_chroma_client(client)
+            raise
+
     def _delete_collection_if_exists(self, client) -> None:
         try:
             client.delete_collection(name=self.collection_name)
@@ -211,10 +220,18 @@ class KnowledgeVectorIndexer:
         chunks = self._load_chunks()
         vector_chunks = [_to_vector_chunk(chunk) for chunk in chunks]
         embeddings = self.embedding_provider.embed_texts([_document_text(chunk) for chunk in vector_chunks])
+        from app.rag.vector_health import build_vector_index_metadata
+
+        index_metadata = build_vector_index_metadata(
+            knowledge_base_dir=self.root_dir,
+            embedding_model=self.embedding_provider.model,
+            collection_name=self.store.collection_name,
+        )
         self.store.rebuild(
             chunks=vector_chunks,
             embeddings=embeddings,
             embedding_model=self.embedding_provider.model,
+            index_metadata=index_metadata.to_chroma_metadata(),
         )
         return KnowledgeVectorRebuildResult(
             status="rebuilt",

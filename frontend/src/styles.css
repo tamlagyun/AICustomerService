@@ -344,6 +344,32 @@ select {
   color: #2454a6;
 }
 
+.vector-health {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  margin: 0 0 16px;
+  border: 1px solid #d8e0ec;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #243147;
+  background: #f8fbff;
+}
+
+.vector-health.ready {
+  border-color: #86c89a;
+}
+
+.vector-health.stale,
+.vector-health.not_ready {
+  border-color: #d3b36a;
+}
+
+.vector-health.unavailable {
+  border-color: #f1a7a1;
+}
+
 .evaluation-summary {
   display: flex;
   flex-wrap: wrap;

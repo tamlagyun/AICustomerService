@@ -193,6 +193,23 @@ export type KnowledgeVectorRebuildResponse = {
   message: string;
 };
 
+export type KnowledgeVectorHealthMetadata = {
+  file_count: number;
+  file_hash: string;
+  indexed_at: string;
+  embedding_provider: string;
+  embedding_model: string;
+  collection_name: string;
+};
+
+export type KnowledgeVectorHealthResponse = {
+  status: "ready" | "stale" | "not_ready" | "unavailable" | string;
+  message: string;
+  collection_name: string;
+  document_count: number;
+  metadata: KnowledgeVectorHealthMetadata | null;
+};
+
 export async function runAgentEvaluations(
   modelProvider: ModelProvider,
   usePlanner: boolean,
@@ -230,4 +247,14 @@ export async function rebuildKnowledgeVectorIndex(): Promise<KnowledgeVectorRebu
   }
 
   return response.json() as Promise<KnowledgeVectorRebuildResponse>;
+}
+
+export async function checkKnowledgeVectorHealth(): Promise<KnowledgeVectorHealthResponse> {
+  const response = await fetch("/api/knowledge-base/vector-health");
+
+  if (!response.ok) {
+    throw new Error("Knowledge vector health request failed");
+  }
+
+  return response.json() as Promise<KnowledgeVectorHealthResponse>;
 }

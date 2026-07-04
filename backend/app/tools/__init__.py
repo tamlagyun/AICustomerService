@@ -1,3 +1,9 @@
+from app.tools.executor import (
+    ToolExecutionContext,
+    ToolExecutionResult,
+    ToolExecutionStatus,
+    execute_tool_action,
+)
 from app.tools.registry import (
     ToolArgumentDefinition,
     ToolArgumentsValidationResult,
@@ -15,6 +21,10 @@ from app.tools.registry import (
 )
 
 __all__ = [
+    "ToolExecutionContext",
+    "ToolExecutionResult",
+    "ToolExecutionStatus",
+    "execute_tool_action",
     "ToolArgumentDefinition",
     "ToolArgumentsValidationResult",
     "ToolArgumentType",

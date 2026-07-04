@@ -7,7 +7,7 @@ from langgraph.graph import END, StateGraph
 
 from app.agent.audit import write_chat_audit_event
 from app.agent.decision import AgentAction, AgentDecision
-from app.agent.map_agent import run_map_agent
+from app.agent.map_agent import MapAgentResult, run_map_agent
 from app.agent.planner import PlanParseError, parse_agent_plan
 from app.agent.policies import (
     correct_decision_with_high_confidence_rules,
@@ -37,7 +37,8 @@ from app.config import get_settings
 from app.conversation_memory import get_conversation_memory
 from app.knowledge_base import KnowledgeBaseSearch
 from app.llm import LLMClientProtocol, build_llm_client
-from app.player_data import PlayerDataStatus, build_player_data_tools
+from app.map_tools import MapToolResult, MapToolStatus
+from app.player_data import PlayerDataResult, PlayerDataStatus, build_player_data_tools
 from app.prompt_registry import PromptNotFoundError
 from app.rag.chroma_store import ChromaIndexNotReady, ChromaUnavailableError, EmbeddingProviderError
 from app.safety import SafetyAction, analyze_safety, redact_sensitive_text
@@ -48,6 +49,12 @@ from app.table_adapter import (
     tables_for_player_attraction_recommendation,
     tables_for_map_result,
     tables_for_player_data_result,
+)
+from app.tools.executor import (
+    ToolExecutionContext,
+    ToolExecutionResult,
+    ToolExecutionStatus,
+    execute_tool_action,
 )
 from app.tools.registry import ToolCategory, get_tool_by_action
 
@@ -566,9 +573,13 @@ def retrieve_knowledge(state: CustomerServiceState) -> CustomerServiceState:
     return _complete_current_plan_step(next_state)
 
 
-def retrieve_player_data(state: CustomerServiceState) -> CustomerServiceState:
+async def retrieve_player_data(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在查询 MySQL 玩家数据")
-    result = build_player_data_tools().get_player_profile(_player_id_for_tool_call(state))
+    execution = await execute_tool_action(
+        _player_profile_decision_for_tool_call(state),
+        _tool_execution_context(state),
+    )
+    result = _player_data_result_from_execution(execution)
     next_state = {
         **state,
         "player_data_result": result,
@@ -580,9 +591,13 @@ def retrieve_player_data(state: CustomerServiceState) -> CustomerServiceState:
     return _complete_current_plan_step(next_state)
 
 
-def retrieve_players_list(state: CustomerServiceState) -> CustomerServiceState:
+async def retrieve_players_list(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在查询 MySQL 玩家列表")
-    result = build_player_data_tools().get_players(_players_limit_for_tool_call(state))
+    execution = await execute_tool_action(
+        _players_list_decision_for_tool_call(state),
+        _tool_execution_context(state),
+    )
+    result = _player_data_result_from_execution(execution)
     next_state = {
         **state,
         "player_data_result": result,
@@ -632,11 +647,11 @@ def route_after_followup_decision(state: CustomerServiceState) -> Literal["map",
 async def retrieve_map_data(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在委托地图 Agent")
     decision = _map_decision_for_tool_call(state)
-    map_agent_result = await run_map_agent(
+    execution = await execute_tool_action(
         decision,
-        message=state["normalized_message"],
-        emit_status=lambda text: _emit_status(state, text),
+        _tool_execution_context(state),
     )
+    map_agent_result = _map_agent_result_from_execution(execution, decision)
 
     next_state = {
         **state,
@@ -889,6 +904,103 @@ def _compiled_graph():
     return build_customer_service_graph()
 
 
+def _tool_execution_context(state: CustomerServiceState) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        settings=get_settings(),
+        message=state.get("normalized_message", state.get("message", "")),
+        emit_status=lambda text: _emit_status(state, text),
+        player_data_tools_factory=build_player_data_tools,
+        map_agent_runner=run_map_agent,
+        enforce_dependencies=False,
+    )
+
+
+def _player_profile_decision_for_tool_call(state: CustomerServiceState) -> AgentDecision:
+    decision = state.get("llm_decision")
+    if decision is not None and decision.action == AgentAction.MYSQL_PLAYER_PROFILE:
+        player_id = _player_id_for_tool_call(state)
+        if player_id and not (decision.arguments or {}).get("player_id"):
+            return AgentDecision(
+                action=decision.action,
+                reason=decision.reason,
+                arguments={**(decision.arguments or {}), "player_id": player_id},
+                final_task=decision.final_task,
+                direct_reply=decision.direct_reply,
+            )
+        return decision
+
+    player_id = _player_id_for_tool_call(state)
+    return AgentDecision(
+        action=AgentAction.MYSQL_PLAYER_PROFILE,
+        reason=decision.reason if decision is not None else "查询玩家资料",
+        arguments={"player_id": player_id} if player_id else {},
+        final_task=decision.final_task if decision is not None else "",
+    )
+
+
+def _players_list_decision_for_tool_call(state: CustomerServiceState) -> AgentDecision:
+    decision = state.get("llm_decision")
+    if decision is not None and decision.action == AgentAction.MYSQL_PLAYERS_LIST:
+        return decision
+
+    return AgentDecision(
+        action=AgentAction.MYSQL_PLAYERS_LIST,
+        reason="查询玩家列表",
+        arguments={"limit": _players_limit_for_tool_call(state)},
+        final_task=decision.final_task if decision is not None else "",
+    )
+
+
+def _player_data_result_from_execution(execution: ToolExecutionResult) -> PlayerDataResult:
+    if isinstance(execution.output, PlayerDataResult):
+        return execution.output
+
+    if (
+        execution.status == ToolExecutionStatus.INVALID_ARGUMENTS
+        and execution.action == AgentAction.MYSQL_PLAYER_PROFILE
+    ):
+        return PlayerDataResult(
+            status=PlayerDataStatus.NOT_FOUND,
+            summary="请先提供玩家 ID，才能查询玩家资料。",
+        )
+
+    if execution.status == ToolExecutionStatus.MISSING_DEPENDENCY:
+        return PlayerDataResult(
+            status=PlayerDataStatus.DISABLED,
+            summary="玩家数据查询尚未启用，请配置 MySQL 后再查询。",
+        )
+
+    return PlayerDataResult(
+        status=PlayerDataStatus.UNAVAILABLE,
+        summary=execution.error or "玩家数据暂时无法查询，请稍后重试或转人工客服处理。",
+    )
+
+
+def _map_agent_result_from_execution(
+    execution: ToolExecutionResult,
+    decision: AgentDecision,
+) -> MapAgentResult:
+    if isinstance(execution.output, MapAgentResult):
+        return execution.output
+
+    if execution.status == ToolExecutionStatus.INVALID_ARGUMENTS:
+        map_result = MapToolResult(
+            status=MapToolStatus.INVALID_REQUEST,
+            summary=execution.error or "地图查询参数不合法，请补充更准确的信息。",
+        )
+    elif execution.status == ToolExecutionStatus.MISSING_DEPENDENCY:
+        map_result = MapToolResult(
+            status=MapToolStatus.DISABLED,
+            summary="地图查询尚未启用，请配置高德地图 MCP 后再查询。",
+        )
+    else:
+        map_result = MapToolResult(
+            status=MapToolStatus.UNAVAILABLE,
+            summary=execution.error or "地图查询暂时不可用，请稍后再试或转人工客服。",
+        )
+    return MapAgentResult(decision=decision, map_result=map_result)
+
+
 def _player_id_for_tool_call(state: CustomerServiceState) -> str | None:
     decision = state.get("llm_decision")
     if decision is not None and decision.arguments:
@@ -928,8 +1040,15 @@ def _players_limit_for_tool_call(state: CustomerServiceState) -> int:
     return 100
 
 
-def _map_decision_for_tool_call(state: CustomerServiceState) -> AgentDecision | None:
-    return state.get("map_decision") or state.get("llm_decision")
+def _map_decision_for_tool_call(state: CustomerServiceState) -> AgentDecision:
+    decision = state.get("map_decision") or state.get("llm_decision")
+    if decision is not None and is_map_decision(decision):
+        return decision
+    return AgentDecision(
+        action=AgentAction.AMAP_PLACE_SEARCH,
+        reason="本地规则：地图类问题默认使用地点搜索",
+        arguments={"keywords": state.get("normalized_message", state.get("message", ""))},
+    )
 
 
 def _current_plan_decision(state: CustomerServiceState) -> AgentDecision | None:

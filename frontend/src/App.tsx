@@ -1,30 +1,16 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import {
-  ChatImage,
-  ChatSource,
-  ChatTable,
   DEFAULT_KNOWLEDGE_SOURCE,
   DEFAULT_MODEL_PROVIDER,
-  EvaluationRunResponse,
-  KnowledgeSource,
-  ModelProvider,
-  rebuildKnowledgeVectorIndex,
   runAgentEvaluations,
   sendChatMessageStream,
 } from "./api/chat";
-
-type ActiveView = "chat" | "evaluation";
-
-type ChatMessage = {
-  role: "player" | "agent";
-  content: string;
-  status?: string;
-  statuses?: string[];
-  sources?: ChatSource[];
-  images?: ChatImage[];
-  tables?: ChatTable[];
-};
+import type { EvaluationRunResponse, KnowledgeSource, ModelProvider } from "./api/chat";
+import { ChatHeader } from "./components/ChatHeader";
+import { EvaluationView } from "./components/EvaluationView";
+import { MessageList } from "./components/MessageList";
+import type { ActiveView, ChatMessage } from "./types/chat";
 
 const initialMessages: ChatMessage[] = [
   {
@@ -129,100 +115,25 @@ export function App() {
   return (
     <main className="page-shell">
       <section className="chat-panel" aria-label="客服聊天">
-        <header className="chat-header">
-          <div>
-            <h1>聊天客服 AI Agent</h1>
-            <p>面向游戏玩家咨询、数据查询和知识库问答</p>
-          </div>
-          <div className="header-actions">
-            <div className="view-tabs" aria-label="功能视图">
-              <button
-                type="button"
-                className={activeView === "chat" ? "active" : ""}
-                aria-pressed={activeView === "chat"}
-                onClick={() => setActiveView("chat")}
-              >
-                聊天
-              </button>
-              <button
-                type="button"
-                className={activeView === "evaluation" ? "active" : ""}
-                aria-pressed={activeView === "evaluation"}
-                onClick={() => setActiveView("evaluation")}
-              >
-                Agent 评测
-              </button>
-            </div>
-            <label className="model-select">
-              <span>模型</span>
-              <select
-                aria-label="选择大模型"
-                value={modelProvider}
-                disabled={isSending || isEvaluating}
-                onChange={(event) => setModelProvider(event.target.value as ModelProvider)}
-              >
-                <option value="deepseek">DeepSeek</option>
-                <option value="qwen">千问</option>
-              </select>
-            </label>
-            <label className="model-select">
-              <span>知识来源</span>
-              <select
-                aria-label="选择知识来源"
-                value={knowledgeSource}
-                disabled={isSending || isEvaluating}
-                onChange={(event) => setKnowledgeSource(event.target.value as KnowledgeSource)}
-              >
-                <option value="doc">doc文档</option>
-                <option value="vector">向量库</option>
-              </select>
-            </label>
-            <label className="planner-toggle">
-              <input
-                type="checkbox"
-                checked={usePlanner}
-                disabled={isSending || isEvaluating}
-                onChange={(event) => setUsePlanner(event.target.checked)}
-              />
-              <span>启用纯模型 Planner</span>
-            </label>
-            <span className="status-pill">本地开发</span>
-          </div>
-        </header>
+        <ChatHeader
+          activeView={activeView}
+          modelProvider={modelProvider}
+          knowledgeSource={knowledgeSource}
+          usePlanner={usePlanner}
+          disabled={isSending || isEvaluating}
+          onViewChange={setActiveView}
+          onModelProviderChange={setModelProvider}
+          onKnowledgeSourceChange={setKnowledgeSource}
+          onUsePlannerChange={setUsePlanner}
+        />
 
         {activeView === "chat" ? (
           <>
-            <div className="message-list" ref={messageListRef}>
-              {messages.map((message, index) => (
-                <article
-                  key={`${message.role}-${index}`}
-                  className={`message ${message.role}${message.tables?.length ? " has-table" : ""}`}
-                >
-                  <span>{message.role === "player" ? "玩家" : "客服 AI"}</span>
-                  <p>{message.content}</p>
-                  {message.statuses?.map((status, statusIndex) => (
-                    <small className="message-status" key={`${status}-${statusIndex}`}>
-                      {status}
-                    </small>
-                  ))}
-                  {message.sources?.map((source) => (
-                    <small key={source.reference}>来源：{source.title}</small>
-                  ))}
-                  {message.images?.map((image) => (
-                    <img
-                      className="message-image"
-                      key={image.url}
-                      src={image.url}
-                      alt={image.alt}
-                      onLoad={scrollMessagesToBottom}
-                    />
-                  ))}
-                  {message.tables?.map((table) => (
-                    <TableRenderer key={table.title} table={table} />
-                  ))}
-                </article>
-              ))}
-            </div>
+            <MessageList
+              messages={messages}
+              messageListRef={messageListRef}
+              onImageLoad={scrollMessagesToBottom}
+            />
 
             <form className="composer" onSubmit={handleSubmit}>
               <input
@@ -249,182 +160,6 @@ export function App() {
       </section>
     </main>
   );
-}
-
-function EvaluationView({
-  isEvaluating,
-  result,
-  error,
-  onRun,
-}: {
-  isEvaluating: boolean;
-  result: EvaluationRunResponse | null;
-  error: string | null;
-  onRun: () => void;
-}) {
-  const [isRebuilding, setIsRebuilding] = useState(false);
-  const [rebuildMessage, setRebuildMessage] = useState<string | null>(null);
-  const [rebuildError, setRebuildError] = useState<string | null>(null);
-
-  async function handleRebuildVectorIndex() {
-    if (isRebuilding) {
-      return;
-    }
-
-    setRebuildMessage(null);
-    setRebuildError(null);
-    setIsRebuilding(true);
-    try {
-      const response = await rebuildKnowledgeVectorIndex();
-      if (response.status === "failed") {
-        setRebuildError(response.message);
-      } else {
-        setRebuildMessage(response.message);
-      }
-    } catch {
-      setRebuildError("重建知识库向量库失败，请确认后端和 Ollama embedding 服务已启动。");
-    } finally {
-      setIsRebuilding(false);
-    }
-  }
-
-  return (
-    <section className="evaluation-view" aria-label="Agent 评测">
-      <div className="evaluation-toolbar">
-        <div>
-          <h2>Agent 评测</h2>
-          <p>调用当前模型和已启用工具运行内置用例，评测接口默认关闭。</p>
-        </div>
-        <div className="evaluation-actions">
-          <button type="button" onClick={handleRebuildVectorIndex} disabled={isRebuilding}>
-            {isRebuilding ? "重建中" : "重建知识库向量库"}
-          </button>
-          <button type="button" onClick={onRun} disabled={isEvaluating}>
-            {isEvaluating ? "评测中" : "运行评测"}
-          </button>
-        </div>
-      </div>
-
-      {rebuildMessage ? <p className="evaluation-info">{rebuildMessage}</p> : null}
-      {rebuildError ? <p className="error-message evaluation-error">{rebuildError}</p> : null}
-      {error ? <p className="error-message evaluation-error">{error}</p> : null}
-
-      {result ? (
-        <div className="evaluation-results">
-          <div className="evaluation-summary">
-            <span>通过 {result.summary.passed}</span>
-            <span>失败 {result.summary.failed}</span>
-            <span>跳过 {result.summary.skipped}</span>
-            <span>总数 {result.summary.total}</span>
-          </div>
-
-          <div className="evaluation-case-list">
-            {result.results.map((caseResult) => (
-              <article className={`evaluation-case ${caseResult.status}`} key={caseResult.case_id}>
-                <div className="evaluation-case-header">
-                  <strong>{caseResult.name}</strong>
-                  <span>{formatEvaluationStatus(caseResult.status)}</span>
-                </div>
-                {caseResult.error ? <p>{caseResult.error}</p> : null}
-                {caseResult.reply ? <p>{caseResult.reply}</p> : null}
-                <dl>
-                  <div>
-                    <dt>工具</dt>
-                    <dd>{formatEvaluationTools(caseResult.tools)}</dd>
-                  </div>
-                  <div>
-                    <dt>计划动作</dt>
-                    <dd>
-                      {caseResult.plan_actions.length ? caseResult.plan_actions.join(", ") : "无"}
-                    </dd>
-                  </div>
-                </dl>
-                <ul>
-                  {caseResult.checks.map((check) => (
-                    <li key={check.name}>
-                      {check.passed ? "通过" : "失败"}：{check.name}
-                    </li>
-                  ))}
-                </ul>
-              </article>
-            ))}
-          </div>
-        </div>
-      ) : (
-        <p className="evaluation-empty">点击运行后显示评测汇总和用例明细。</p>
-      )}
-    </section>
-  );
-}
-
-function TableRenderer({ table }: { table: ChatTable }) {
-  return (
-    <section className="message-table" aria-label={table.title}>
-      <strong>{table.title}</strong>
-      <div className="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              {table.columns.map((column) => (
-                <th key={column.key} scope="col">
-                  {column.label}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {table.rows.map((row, rowIndex) => (
-              <tr key={rowIndex}>
-                {table.columns.map((column) => (
-                  <td key={column.key}>{formatTableCell(row[column.key])}</td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-function formatTableCell(value: unknown): string {
-  if (value === null || value === undefined) {
-    return "";
-  }
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  return JSON.stringify(value);
-}
-
-function formatEvaluationStatus(status: string): string {
-  if (status === "passed") {
-    return "通过";
-  }
-  if (status === "failed") {
-    return "失败";
-  }
-  return "跳过";
-}
-
-function formatEvaluationTools(tools: unknown[]): string {
-  if (!tools.length) {
-    return "无";
-  }
-  return tools.map(formatEvaluationTool).join(", ");
-}
-
-function formatEvaluationTool(tool: unknown): string {
-  if (typeof tool === "string") {
-    return tool;
-  }
-  if (tool && typeof tool === "object") {
-    const toolRecord = tool as Record<string, unknown>;
-    const name = typeof toolRecord.tool === "string" ? toolRecord.tool : "unknown_tool";
-    const status = typeof toolRecord.status === "string" ? toolRecord.status : "";
-    return status ? `${name}(${status})` : name;
-  }
-  return String(tool);
 }
 
 function updateLastAgentMessage(

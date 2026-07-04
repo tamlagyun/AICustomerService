@@ -32,6 +32,7 @@ from app.agent.prompting import (
 )
 from app.agent.state import CustomerServiceState, QuestionType
 from app.agent.streaming import StreamingLLMClient
+from app.agent.trace import AgentTrace, TraceEventType
 from app.avatar_generation import build_avatar_generator
 from app.config import get_settings
 from app.conversation_memory import get_conversation_memory
@@ -240,6 +241,7 @@ async def run_customer_service_agent(
             "conversation_history": memory.get_recent_messages(session_id),
             "llm_client": selected_llm_client,
             "status_queue": status_queue,
+            "agent_trace": AgentTrace(),
         }
     )
     response = ChatResponse(
@@ -338,12 +340,19 @@ async def stream_customer_service_agent(
 
 def analyze_safety_node(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在检查安全策略")
-    normalized_message = state["message"].strip()
-    return {
-        **state,
-        "normalized_message": normalized_message,
-        "safety_decision": analyze_safety(normalized_message),
-    }
+    started_at = _trace_started(state, TraceEventType.NODE_STARTED, "analyze_safety")
+    try:
+        normalized_message = state["message"].strip()
+        next_state = {
+            **state,
+            "normalized_message": normalized_message,
+            "safety_decision": analyze_safety(normalized_message),
+        }
+    except Exception as exc:
+        _trace_finished(state, TraceEventType.NODE_FINISHED, "analyze_safety", started_at, error=str(exc))
+        raise
+    _trace_finished(next_state, TraceEventType.NODE_FINISHED, "analyze_safety", started_at)
+    return next_state
 
 
 def route_safety(state: CustomerServiceState) -> Literal["allow", "handoff", "refuse"]:
@@ -359,8 +368,16 @@ async def plan_with_llm(state: CustomerServiceState) -> CustomerServiceState:
     if not state.get("use_planner"):
         return state
 
+    started_at = _trace_started(state, TraceEventType.PLANNER_STARTED, "plan_with_llm")
     llm_client = state.get("llm_client")
     if llm_client is None:
+        _trace_finished(
+            state,
+            TraceEventType.PLANNER_FINISHED,
+            "plan_with_llm",
+            started_at,
+            {"fallback_reason": "llm_unavailable"},
+        )
         return {**state, "planner_fallback_reason": "llm_unavailable"}
 
     try:
@@ -376,25 +393,54 @@ async def plan_with_llm(state: CustomerServiceState) -> CustomerServiceState:
             parse_agent_plan(response.content),
         )
     except PromptNotFoundError:
+        _trace_finished(
+            state,
+            TraceEventType.PLANNER_FINISHED,
+            "plan_with_llm",
+            started_at,
+            error="PromptNotFoundError",
+        )
         logger.exception("Prompt loading failed during Planner; session_id=%s", state.get("session_id"))
         raise
     except PlanParseError as exc:
+        _trace_finished(
+            state,
+            TraceEventType.PLANNER_FINISHED,
+            "plan_with_llm",
+            started_at,
+            error=type(exc).__name__,
+        )
         logger.exception("Planner failed; session_id=%s", state.get("session_id"))
         _emit_status(state, f"Planner 生成计划失败，正在回退旧决策流程：{type(exc).__name__}")
         return {**state, "planner_fallback_reason": type(exc).__name__}
     except Exception as exc:
+        _trace_finished(
+            state,
+            TraceEventType.PLANNER_FINISHED,
+            "plan_with_llm",
+            started_at,
+            error=type(exc).__name__,
+        )
         logger.exception("Planner failed; session_id=%s", state.get("session_id"))
         _emit_status(state, f"Planner 生成计划失败，正在回退旧决策流程：{type(exc).__name__}")
         return {**state, "planner_fallback_reason": type(exc).__name__}
 
     first_decision = plan.steps[0].to_decision(fallback_final_task=plan.final_task)
-    return {
+    next_state = {
         **state,
         "agent_plan": plan,
         "plan_step_index": 0,
         "completed_plan_steps": [],
         "llm_decision": first_decision,
     }
+    _trace_finished(
+        next_state,
+        TraceEventType.PLANNER_FINISHED,
+        "plan_with_llm",
+        started_at,
+        {"steps": len(plan.steps), "actions": plan.actions()},
+    )
+    return next_state
 
 
 def route_after_planning(
@@ -423,6 +469,7 @@ async def decide_action_with_llm(state: CustomerServiceState) -> CustomerService
         _emit_status(state, "正在使用本地规则决策")
         return state
 
+    started_at = _trace_started(state, TraceEventType.LLM_STARTED, "decide_action")
     try:
         _emit_status(state, "正在请求大模型决策")
         decision = await llm_client.decide_action(
@@ -432,15 +479,36 @@ async def decide_action_with_llm(state: CustomerServiceState) -> CustomerService
             )
         )
     except PromptNotFoundError:
+        _trace_finished(
+            state,
+            TraceEventType.LLM_FINISHED,
+            "decide_action",
+            started_at,
+            error="PromptNotFoundError",
+        )
         logger.exception("Prompt loading failed during LLM decision; session_id=%s", state.get("session_id"))
         raise
     except Exception as exc:
+        _trace_finished(
+            state,
+            TraceEventType.LLM_FINISHED,
+            "decide_action",
+            started_at,
+            error=type(exc).__name__,
+        )
         logger.exception("LLM decision failed; session_id=%s", state.get("session_id"))
         _emit_status(state, f"大模型决策失败，正在使用本地规则决策：{type(exc).__name__}")
         return state
 
     corrected_decision = correct_decision_with_high_confidence_rules(state, decision)
     next_state = {**state, "llm_decision": corrected_decision}
+    _trace_finished(
+        next_state,
+        TraceEventType.LLM_FINISHED,
+        "decide_action",
+        started_at,
+        {"action": str(corrected_decision.action)},
+    )
     knowledge_results = knowledge_results_for_overridable_decision(next_state, corrected_decision)
     if knowledge_results:
         return {
@@ -544,6 +612,7 @@ def route_after_player_data(state: CustomerServiceState) -> Literal["avatar", "p
 
 def retrieve_knowledge(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在检索知识库")
+    started_at = _trace_started(state, TraceEventType.NODE_STARTED, "retrieve_knowledge")
     precheck_results = state.get("knowledge_precheck_results")
     try:
         if precheck_results is not None:
@@ -570,11 +639,20 @@ def retrieve_knowledge(state: CustomerServiceState) -> CustomerServiceState:
         and precheck_results is None
         and should_use_llm_final_reply(state),
     }
+    _trace_finished(
+        next_state,
+        TraceEventType.NODE_FINISHED,
+        "retrieve_knowledge",
+        started_at,
+        {"result_count": len(results)},
+        error=knowledge_unavailable_reason,
+    )
     return _complete_current_plan_step(next_state)
 
 
 async def retrieve_player_data(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在查询 MySQL 玩家数据")
+    started_at = _trace_started(state, TraceEventType.NODE_STARTED, "retrieve_player_data")
     execution = await execute_tool_action(
         _player_profile_decision_for_tool_call(state),
         _tool_execution_context(state),
@@ -585,6 +663,14 @@ async def retrieve_player_data(state: CustomerServiceState) -> CustomerServiceSt
         "player_data_result": result,
         "use_llm_final_reply": should_use_llm_final_reply(state),
     }
+    _trace_finished(
+        next_state,
+        TraceEventType.NODE_FINISHED,
+        "retrieve_player_data",
+        started_at,
+        {"status": str(result.status)},
+        error=execution.error,
+    )
     current_plan_decision = _current_plan_decision(state)
     if current_plan_decision is not None and current_plan_decision.action == AgentAction.AVATAR_GENERATE:
         return next_state
@@ -593,6 +679,7 @@ async def retrieve_player_data(state: CustomerServiceState) -> CustomerServiceSt
 
 async def retrieve_players_list(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在查询 MySQL 玩家列表")
+    started_at = _trace_started(state, TraceEventType.NODE_STARTED, "retrieve_players_list")
     execution = await execute_tool_action(
         _players_list_decision_for_tool_call(state),
         _tool_execution_context(state),
@@ -603,6 +690,14 @@ async def retrieve_players_list(state: CustomerServiceState) -> CustomerServiceS
         "player_data_result": result,
         "use_llm_final_reply": should_use_llm_final_reply(state),
     }
+    _trace_finished(
+        next_state,
+        TraceEventType.NODE_FINISHED,
+        "retrieve_players_list",
+        started_at,
+        {"status": str(result.status)},
+        error=execution.error,
+    )
     return _complete_current_plan_step(next_state)
 
 
@@ -646,6 +741,7 @@ def route_after_followup_decision(state: CustomerServiceState) -> Literal["map",
 
 async def retrieve_map_data(state: CustomerServiceState) -> CustomerServiceState:
     _emit_status(state, "正在委托地图 Agent")
+    started_at = _trace_started(state, TraceEventType.NODE_STARTED, "retrieve_map_data")
     decision = _map_decision_for_tool_call(state)
     execution = await execute_tool_action(
         decision,
@@ -659,6 +755,14 @@ async def retrieve_map_data(state: CustomerServiceState) -> CustomerServiceState
         "map_result": map_agent_result.map_result,
         "use_llm_final_reply": should_use_llm_final_reply(state),
     }
+    _trace_finished(
+        next_state,
+        TraceEventType.NODE_FINISHED,
+        "retrieve_map_data",
+        started_at,
+        {"status": str(map_agent_result.map_result.status)},
+        error=execution.error,
+    )
     return _complete_current_plan_step(next_state)
 
 
@@ -870,17 +974,34 @@ async def generate_llm_final_reply(state: CustomerServiceState) -> CustomerServi
     if llm_client is None:
         return state
 
+    started_at = _trace_started(state, TraceEventType.LLM_STARTED, "final_reply")
     try:
         response = await llm_client.generate_reply(final_reply_messages(state))
     except PromptNotFoundError:
+        _trace_finished(
+            state,
+            TraceEventType.LLM_FINISHED,
+            "final_reply",
+            started_at,
+            error="PromptNotFoundError",
+        )
         logger.exception("Prompt loading failed during LLM final reply; session_id=%s", state.get("session_id"))
         raise
     except Exception as exc:
+        _trace_finished(
+            state,
+            TraceEventType.LLM_FINISHED,
+            "final_reply",
+            started_at,
+            error=type(exc).__name__,
+        )
         logger.exception("LLM final reply failed; session_id=%s", state.get("session_id"))
         _emit_status(state, f"大模型生成失败，保留工具结果回复：{type(exc).__name__}")
         return state
 
-    return {**state, "reply": response.content}
+    next_state = {**state, "reply": response.content}
+    _trace_finished(next_state, TraceEventType.LLM_FINISHED, "final_reply", started_at)
+    return next_state
 
 
 def finalize_response(state: CustomerServiceState) -> CustomerServiceState:
@@ -891,6 +1012,32 @@ def _emit_status(state: CustomerServiceState, message: str) -> None:
     status_queue = state.get("status_queue")
     if status_queue is not None:
         status_queue.put_nowait(message)
+
+
+def _trace_started(
+    state: CustomerServiceState,
+    event_type: TraceEventType,
+    name: str,
+    metadata: dict[str, object] | None = None,
+) -> float | None:
+    trace = state.get("agent_trace")
+    if trace is None:
+        return None
+    return trace.record_started(event_type, name, metadata)
+
+
+def _trace_finished(
+    state: CustomerServiceState,
+    event_type: TraceEventType,
+    name: str,
+    started_at: float | None,
+    metadata: dict[str, object] | None = None,
+    error: str = "",
+) -> None:
+    trace = state.get("agent_trace")
+    if trace is None:
+        return
+    trace.record_finished(event_type, name, started_at, metadata, error=error)
 
 
 def _record_conversation_exchange(session_id: str, user_message: str, assistant_reply: str) -> None:
@@ -912,6 +1059,7 @@ def _tool_execution_context(state: CustomerServiceState) -> ToolExecutionContext
         player_data_tools_factory=build_player_data_tools,
         map_agent_runner=run_map_agent,
         enforce_dependencies=False,
+        agent_trace=state.get("agent_trace"),
     )
 
 

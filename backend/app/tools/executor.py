@@ -7,6 +7,7 @@ from typing import Protocol
 
 from app.agent.decision import AgentAction, AgentDecision
 from app.agent.map_agent import MapAgentResult, run_map_agent
+from app.agent.trace import AgentTrace, TraceEventType
 from app.config import Settings
 from app.player_data import PlayerDataResult, build_player_data_tools
 from app.tools.registry import (
@@ -48,6 +49,7 @@ class ToolExecutionContext:
     player_data_tools_factory: Callable[[], PlayerDataToolsProtocol] | None = None
     map_agent_runner: Callable[..., Awaitable[MapAgentResult]] | None = None
     enforce_dependencies: bool = True
+    agent_trace: AgentTrace | None = None
 
 
 @dataclass(frozen=True)
@@ -74,41 +76,48 @@ async def execute_tool_action(
             error=f"Unsupported tool action: {decision.action}",
         )
 
+    trace_started_at = _record_tool_started(context, tool, decision)
     validation = validate_tool_arguments(decision.action, decision.arguments)
     if not validation.valid:
+        error = "; ".join(validation.errors)
+        _record_tool_failed(context, tool, trace_started_at, error)
         return ToolExecutionResult(
             status=ToolExecutionStatus.INVALID_ARGUMENTS,
             action=decision.action,
             tool_name=tool.name,
             arguments=validation.arguments,
-            error="; ".join(validation.errors),
+            error=error,
         )
 
     if context.enforce_dependencies:
         missing_dependencies = missing_tool_dependencies(context.settings, tool)
         if missing_dependencies:
+            error = "Missing tool dependencies: " + ", ".join(
+                str(dependency) for dependency in missing_dependencies
+            )
+            _record_tool_failed(context, tool, trace_started_at, error)
             return ToolExecutionResult(
                 status=ToolExecutionStatus.MISSING_DEPENDENCY,
                 action=decision.action,
                 tool_name=tool.name,
                 arguments=validation.arguments,
-                error=(
-                    "Missing tool dependencies: "
-                    + ", ".join(str(dependency) for dependency in missing_dependencies)
-                ),
+                error=error,
             )
 
     try:
         output = await _dispatch_tool(tool, decision, validation.arguments, context)
     except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        _record_tool_failed(context, tool, trace_started_at, error)
         return ToolExecutionResult(
             status=ToolExecutionStatus.ERROR,
             action=decision.action,
             tool_name=tool.name,
             arguments=validation.arguments,
-            error=f"{type(exc).__name__}: {exc}",
+            error=error,
         )
 
+    _record_tool_finished(context, tool, trace_started_at)
     return ToolExecutionResult(
         status=ToolExecutionStatus.SUCCESS,
         action=decision.action,
@@ -173,3 +182,55 @@ def _int_argument(arguments: dict[str, object], name: str, default: int) -> int:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     return default
+
+
+def _record_tool_started(
+    context: ToolExecutionContext,
+    tool: ToolDefinition,
+    decision: AgentDecision,
+) -> float | None:
+    if context.agent_trace is None:
+        return None
+    return context.agent_trace.record_started(
+        TraceEventType.TOOL_STARTED,
+        tool.name,
+        {
+            "action": str(decision.action),
+        },
+    )
+
+
+def _record_tool_finished(
+    context: ToolExecutionContext,
+    tool: ToolDefinition,
+    started_at: float | None,
+) -> None:
+    if context.agent_trace is None:
+        return
+    context.agent_trace.record_finished(
+        TraceEventType.TOOL_FINISHED,
+        tool.name,
+        started_at,
+        {
+            "status": str(ToolExecutionStatus.SUCCESS),
+        },
+    )
+
+
+def _record_tool_failed(
+    context: ToolExecutionContext,
+    tool: ToolDefinition,
+    started_at: float | None,
+    error: str,
+) -> None:
+    if context.agent_trace is None:
+        return
+    context.agent_trace.record_finished(
+        TraceEventType.TOOL_FAILED,
+        tool.name,
+        started_at,
+        {
+            "error": error,
+        },
+        error=error,
+    )

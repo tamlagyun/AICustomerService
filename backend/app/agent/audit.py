@@ -53,6 +53,7 @@ def write_chat_audit_event(
                     for table in response.tables
                 ],
                 "tools": _audit_tools(final_state),
+                **_audit_trace_summary(final_state),
             },
         )
     except Exception:
@@ -122,3 +123,20 @@ def _audit_tools(state: CustomerServiceState | None) -> list[dict[str, object]]:
         )
 
     return tools
+
+
+def _audit_trace_summary(state: CustomerServiceState | None) -> dict[str, object]:
+    if state is None:
+        return {
+            "trace_event_count": 0,
+            "trace_errors": [],
+            "trace_duration_ms": 0,
+        }
+    trace = state.get("agent_trace")
+    if trace is None:
+        return {
+            "trace_event_count": 0,
+            "trace_errors": [],
+            "trace_duration_ms": 0,
+        }
+    return trace.summary()

@@ -5,6 +5,7 @@ from typing import Literal, TypedDict
 
 from app.agent.decision import AgentDecision
 from app.agent.planner import AgentPlan
+from app.agent.trace import AgentTrace
 from app.avatar_generation import AvatarGenerationResult
 from app.conversation_memory import ConversationMessage
 from app.knowledge_base import KnowledgeChunk
@@ -40,6 +41,7 @@ class CustomerServiceState(TypedDict, total=False):
     map_decision: AgentDecision
     use_planner: bool
     agent_plan: AgentPlan
+    agent_trace: AgentTrace
     plan_step_index: int
     completed_plan_steps: list[dict[str, object]]
     planner_fallback_reason: str

@@ -140,7 +140,7 @@ export function App() {
                 aria-label="输入玩家问题"
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
-                placeholder="例如：充值不到账怎么办？"
+                placeholder="例如：充值未到账、登录异常或账号问题"
                 disabled={isSending}
               />
               <button type="submit" disabled={isSending}>
